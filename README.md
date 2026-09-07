@@ -149,6 +149,7 @@ docker compose up -d --build
 | 📋 **Merchants** | List merchants — tap one to remove |
 | 👥 **Set group** | One click: choose the group that receives updates |
 | ⚙️ **Settings** | Liquidity, Buy/Sell buttons, auto-delete timers, **join/left cleanup** |
+| 🟢🔴 **Buy/Sell buttons** | Swap Buy/Sell order and edit their labels + links |
 | 📝 **Custom Msg** | Customize the **full** post: header, body (per-merchant template), footer |
 | 👁 **Preview** | See exactly how the group post will look |
 | 🔄 **Refresh** | Refresh the panel |
@@ -183,6 +184,44 @@ HTML (`<b>`, `<i>`, `<code>`, `<a href>`) and new lines are supported. Example 3
 ```
 
 Use **👁 Preview** to check the result before it goes to the group.
+
+### 🟢🔴 Buy / Sell buttons — order, labels & links
+
+Under every group post the bot shows one row of inline buttons per merchant. By default it is
+**🟢 BUY on the left · 🔴 SELL on the right** — and everything about them is editable from the
+**private chat with the bot**: tap **🟢🔴 Buy/Sell buttons** on the panel (or ⚙️ Settings →
+**🟢🔴 Edit Buy/Sell buttons**).
+
+| Menu item | What it does |
+|---|---|
+| 🔘 **Buttons: ON/OFF** | Show or hide the buttons in the group post |
+| 🔄 **Order** | Switch between `🟢 Buy ⬅️ \| Sell ➡️ 🔴` and `🔴 Sell ⬅️ \| Buy ➡️ 🟢` (the price lines in the text follow the same order) |
+| 🟢 **Edit BUY label** | Send your own caption for the Buy button |
+| 🔴 **Edit SELL label** | Send your own caption for the Sell button |
+| 🔗 **BUY / SELL link** | Optional custom URL (default: the merchant profile page) |
+| ♻️ **Reset buttons to default** | Back to the defaults below |
+
+Defaults:
+
+```
+🟢 BUY {PRICE} {NICK}      🔴 SELL {PRICE} {NICK}
+```
+
+**Label placeholders**
+
+| Placeholder | Replaced with |
+|---|---|
+| `{PRICE}` | Best price for that side |
+| `{NICK}` / `{FULLNICK}` | Merchant nickname (max 14 chars) / full nickname |
+| `{EXCHANGE}` / `{ICON}` | Exchange name / emoji (🟡 🟣 ⚫ 🔵) |
+| `{AMOUNT}` | Available liquidity for that side |
+| `{ASSET}` / `{FIAT}` / `{PAIR}` | e.g. `USDT`, `USD`, `USDT/USD` |
+| `{SIDE}` | `BUY` or `SELL` |
+
+Telegram limits a button caption to ~64 characters — if your template renders longer, the bot drops
+the nickname automatically and truncates as a last resort. Link placeholders: `{URL}` (merchant
+profile), `{NICK}`, `{EXCHANGE}`, `{ASSET}`, `{FIAT}`. Send `default` while editing to restore the
+default label/link, or `/cancel` to abort. Use **👁 Preview** to see the real buttons before posting.
 
 ### 🚪 Auto-delete “joined / left the group” messages
 
