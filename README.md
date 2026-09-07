@@ -10,7 +10,7 @@ chmod +x install.sh
 
 ## ⚡ One-Click Uninstall
 ```bash
-https://raw.githubusercontent.com/sarakmacbook/Price_Update_Feed_Exchange_Crypto/refs/heads/main/uninstall.sh
+wget https://raw.githubusercontent.com/sarakmacbook/Price_Update_Feed_Exchange_Crypto/refs/heads/main/uninstall.sh
 
 chmod +x uninstall.sh
 
