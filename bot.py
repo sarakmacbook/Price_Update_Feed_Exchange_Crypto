@@ -154,6 +154,10 @@ if ":" not in TOKEN:
     sys.exit(1)
 
 # ── state ──
+# default look of the inline Buy / Sell buttons under the group post
+DEFAULT_BUY_LABEL = "🟢 BUY {PRICE} {NICK}"
+DEFAULT_SELL_LABEL = "🔴 SELL {PRICE} {NICK}"
+
 DEFAULT_SETTINGS = {
     "show_liquidity": False,
     "show_buttons": True,
@@ -162,7 +166,13 @@ DEFAULT_SETTINGS = {
     "custom_footer": "",
     "auto_delete": True,  # delete previous group message on new post
     "delete_after_hours": 24,  # auto delete after 24h
-    "delete_join_left": True  # delete Telegram "X joined/left the group" service messages
+    "delete_join_left": True,  # delete Telegram "X joined/left the group" service messages
+    # ── Buy / Sell buttons (editable from the private bot chat) ──
+    "buttons_order": "buy_sell",   # "buy_sell" = Buy left / Sell right, "sell_buy" = the opposite
+    "btn_buy_label": "",           # empty = DEFAULT_BUY_LABEL
+    "btn_sell_label": "",          # empty = DEFAULT_SELL_LABEL
+    "btn_buy_url": "",             # empty = merchant profile URL
+    "btn_sell_url": "",            # empty = merchant profile URL
 }
 
 def load():
@@ -240,6 +250,7 @@ def panel():
         [B("⚙️ Settings", callback_data="settings"), B("📝 Custom Msg", callback_data="custom_menu")],
         [B(f"{liq_icon} Liquidity: {'ON' if s.get('show_liquidity') else 'OFF'}", callback_data="toggle_liquidity"),
          B(f"🔘 Buttons: {'ON' if s.get('show_buttons') else 'OFF'}", callback_data="toggle_buttons")],
+        [B("🟢🔴 Buy/Sell buttons", callback_data="buttons_menu")],
         [B("👁 Preview", callback_data="preview"), B("🔄 Refresh", callback_data="panel")]
     ])
 
@@ -248,12 +259,26 @@ def settings_kb():
     return KB([
         [B(f"💧 Liquidity: {'ON ✅' if s.get('show_liquidity') else 'OFF ❌'}", callback_data="toggle_liquidity"),
          B(f"🔘 Buy/Sell Buttons: {'ON ✅' if s.get('show_buttons') else 'OFF ❌'}", callback_data="toggle_buttons")],
+        [B("🟢🔴 Edit Buy/Sell buttons", callback_data="buttons_menu")],
         [B(f"🗑 Auto-delete prev: {'ON ✅' if s.get('auto_delete') else 'OFF ❌'}", callback_data="toggle_autodelete"),
          B(f"⏰ Delete after {s.get('delete_after_hours',24)}h", callback_data="toggle_delete_hours")],
         [B(f"🚪 Del Join/Left msgs: {'ON ✅' if s.get('delete_join_left', True) else 'OFF ❌'}", callback_data="toggle_joinleft")],
         [B("📝 Edit Header", callback_data="edit_header"), B("📝 Edit Body", callback_data="edit_body")],
         [B("📝 Edit Footer", callback_data="edit_footer"), B("🗑 Clear Custom Msg", callback_data="clear_custom")],
         [B("👁 Preview", callback_data="preview"), B("⬅️ Back", callback_data="panel")]
+    ])
+
+def buttons_menu_kb():
+    s = get_settings()
+    return KB([
+        [B(f"🔘 Buttons: {'ON ✅' if s.get('show_buttons') else 'OFF ❌'}", callback_data="toggle_buttons"),
+         B(f"🔄 Order: {order_label()}", callback_data="toggle_btn_order")],
+        [B("🟢 Edit BUY label", callback_data="edit_buy_label"),
+         B("🔴 Edit SELL label", callback_data="edit_sell_label")],
+        [B("🔗 BUY link", callback_data="edit_buy_url"),
+         B("🔗 SELL link", callback_data="edit_sell_url")],
+        [B("♻️ Reset buttons to default", callback_data="reset_buttons")],
+        [B("👁 Preview", callback_data="preview"), B("⬅️ Back", callback_data="settings")]
     ])
 
 def custom_menu_kb():
@@ -287,6 +312,7 @@ def panel_text():
         f"Group: <code>{g}</code>\n"
         f"Merchants: {len(state['merchants'])} · Pair: {ASSET}/{FIAT} · every {INTERVAL}s\n"
         f"💧 Liquidity: <b>{liq}</b> · 🔘 Buttons: <b>{btns}</b> · 🗑 AutoDel: <b>{autodel}</b>\n"
+        f"🔄 Btn order: <b>{order_label()}</b>\n"
         f"🚪 Del Join/Left msgs: <b>{joinleft}</b>\n"
         f"📝 Header: <code>{header_short}</code>\n"
         f"📝 Body: <code>{body_short}</code>\n"
@@ -311,7 +337,9 @@ def settings_text():
         f"💧 Show liquidity amount: <b>{liq}</b>\n"
         f"   When ON, shows available amount next to price.\n\n"
         f"🔘 Show Buy/Sell buttons in group: <b>{btns}</b>\n"
-        f"   When ON, group message includes Buy/Sell URL buttons.\n\n"
+        f"   When ON, group message includes Buy/Sell URL buttons.\n"
+        f"   Order: <b>{order_label()}</b> — tap 🟢🔴 Edit Buy/Sell buttons to change\n"
+        f"   the order, the labels and the links.\n\n"
         f"🗑 Auto-delete previous message: <b>{autodel}</b>\n"
         f"   When ON, deletes previous price message on refresh/update.\n\n"
         f"⏰ Auto-delete after: <b>{del_hours}h</b>\n"
@@ -327,6 +355,40 @@ def settings_text():
         f"Body placeholders: <code>{{ICON}}</code> <code>{{EXCHANGE}}</code> <code>{{NICK}}</code> <code>{{SELL}}</code> <code>{{BUY}}</code> "
         f"<code>{{SELL_AMOUNT}}</code> <code>{{BUY_AMOUNT}}</code> <code>{{LINK}}</code> <code>{{URL}}</code> <code>{{ERROR}}</code> and header ones.\n"
         f"HTML allowed: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;, &lt;a&gt; etc."
+    )
+
+def html_escape(t: str) -> str:
+    return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def buttons_menu_text():
+    s = get_settings()
+    on = "ON ✅" if s.get("show_buttons") else "OFF ❌"
+    buy_tpl = s.get("btn_buy_label") or DEFAULT_BUY_LABEL
+    sell_tpl = s.get("btn_sell_label") or DEFAULT_SELL_LABEL
+    buy_url = s.get("btn_buy_url") or "(merchant profile URL)"
+    sell_url = s.get("btn_sell_url") or "(merchant profile URL)"
+    if buttons_order() == "buy_sell":
+        preview_row = f"[ {html_escape(buy_tpl)} ] [ {html_escape(sell_tpl)} ]"
+        order_txt = "🟢 <b>BUY left</b> · 🔴 <b>SELL right</b>"
+    else:
+        preview_row = f"[ {html_escape(sell_tpl)} ] [ {html_escape(buy_tpl)} ]"
+        order_txt = "🔴 <b>SELL left</b> · 🟢 <b>BUY right</b>"
+    return (
+        f"🟢🔴 <b>Buy / Sell buttons</b>\n\n"
+        f"These are the inline buttons under the price post in your group.\n\n"
+        f"🔘 Buttons: <b>{on}</b>\n"
+        f"🔄 Order: {order_txt}\n\n"
+        f"🟢 <b>BUY label:</b>\n<code>{html_escape(buy_tpl)}</code>\n"
+        f"🔴 <b>SELL label:</b>\n<code>{html_escape(sell_tpl)}</code>\n\n"
+        f"🔗 BUY link: <code>{html_escape(buy_url)}</code>\n"
+        f"🔗 SELL link: <code>{html_escape(sell_url)}</code>\n\n"
+        f"<b>Row preview (per merchant):</b>\n{preview_row}\n\n"
+        f"<b>Label placeholders:</b>\n"
+        f"<code>{{PRICE}}</code> <code>{{NICK}}</code> <code>{{FULLNICK}}</code> <code>{{EXCHANGE}}</code> "
+        f"<code>{{ICON}}</code> <code>{{AMOUNT}}</code> <code>{{ASSET}}</code> <code>{{FIAT}}</code> "
+        f"<code>{{PAIR}}</code> <code>{{SIDE}}</code>\n"
+        f"Max 60 chars — the nickname is dropped automatically if the label gets too long.\n"
+        f"Tap 👁 Preview to see the real buttons."
     )
 
 def custom_menu_text():
@@ -476,6 +538,29 @@ async def on_text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await u.message.reply_html(panel_text(), reply_markup=panel())
         return
 
+    if awaiting in ("buy_label", "sell_label", "buy_url", "sell_url"):
+        if txt.lower() == "/cancel":
+            c.user_data.pop("awaiting_custom", None)
+            await u.message.reply_text("❌ Cancelled.", reply_markup=panel())
+            return
+        side, kind = awaiting.split("_")          # buy/sell , label/url
+        value = "" if txt.lower() in ("default", "reset", "-", "none") else txt
+        if kind == "url" and value and not re.match(r"^(https?://|tg://|\{URL\})", value):
+            await u.message.reply_text("❌ Link must start with https:// (or use {URL}). Try again, or /cancel.")
+            return
+        if kind == "label" and len(value) > 200:
+            await u.message.reply_text("❌ Label template too long (max 200 chars). Try again, or /cancel.")
+            return
+        state["settings"][f"btn_{side}_{kind}"] = value
+        save()
+        c.user_data.pop("awaiting_custom", None)
+        icon = "🟢" if side == "buy" else "🔴"
+        shown = value or ("(default)" if kind == "url" else
+                          (DEFAULT_BUY_LABEL if side == "buy" else DEFAULT_SELL_LABEL) + "  (default)")
+        await u.message.reply_html(f"✅ {icon} {side.upper()} button {kind} saved:\n<code>{html_escape(shown[:300])}</code>")
+        await u.message.reply_html(buttons_menu_text(), reply_markup=buttons_menu_kb())
+        return
+
     m = parse_url(txt, ASSET, FIAT)
     if not m:
         return await u.message.reply_text("❌ Not a supported merchant URL (Binance / Bybit / OKX / Bitget).   /start")
@@ -542,14 +627,69 @@ def report(prices):
         if buy_amt:
             buy_line += f"  💧 {buy_amt} {m.asset}"
 
-        lines.append(sell_line)
-        lines.append(buy_line + "\n")
+        # keep the text lines in the same order as the Buy/Sell buttons
+        if buttons_order() == "buy_sell":
+            lines.append(buy_line)
+            lines.append(sell_line + "\n")
+        else:
+            lines.append(sell_line)
+            lines.append(buy_line + "\n")
 
     custom_footer = s.get("custom_footer", "").strip()
     if custom_footer:
         lines.append(apply_template(custom_footer))
 
     return "\n".join(lines).strip()
+
+# ── Buy / Sell button helpers ──
+def buy_label_tpl():
+    return (get_settings().get("btn_buy_label") or "").strip() or DEFAULT_BUY_LABEL
+
+def sell_label_tpl():
+    return (get_settings().get("btn_sell_label") or "").strip() or DEFAULT_SELL_LABEL
+
+def buttons_order():
+    return "sell_buy" if get_settings().get("buttons_order") == "sell_buy" else "buy_sell"
+
+def order_label():
+    return "🟢 Buy ⬅️ | Sell ➡️ 🔴" if buttons_order() == "buy_sell" else "🔴 Sell ⬅️ | Buy ➡️ 🟢"
+
+def render_btn_label(tpl: str, m: Merchant, price, amount, side: str) -> str:
+    """Render a Buy/Sell button caption. Single-pass placeholder substitution."""
+    nick = (m.nickname or m.merchant_id or "")
+    mapping = {
+        "PRICE": fmt(price), "price": fmt(price),
+        "AMOUNT": fmt_amount(amount) or "—", "LIQ": fmt_amount(amount) or "—",
+        "NICK": nick[:14], "nick": nick[:14], "FULLNICK": nick,
+        "EXCHANGE": m.exchange.title(), "exchange": m.exchange,
+        "ICON": ICON.get(m.exchange, "💱"),
+        "ASSET": ASSET, "asset": ASSET.lower(),
+        "FIAT": FIAT, "fiat": FIAT.lower(),
+        "PAIR": f"{ASSET}/{FIAT}", "pair": f"{ASSET}/{FIAT}",
+        "SIDE": side.upper(), "side": side.lower(),
+    }
+    keys = sorted(mapping, key=len, reverse=True)
+    pattern = re.compile(r"\{(" + "|".join(re.escape(k) for k in keys) + r")\}")
+    label = pattern.sub(lambda mm: mapping[mm.group(1)], tpl)
+    label = " ".join(label.split())
+    if len(label) > 60:
+        # too long → drop the merchant nickname first, then hard-truncate
+        short = pattern.sub(lambda mm: "" if mm.group(1).lower() in ("nick", "fullnick") else mapping[mm.group(1)], tpl)
+        label = " ".join(short.split()) or label
+        if len(label) > 60:
+            label = label[:59].rstrip() + "…"
+    return label or side.upper()
+
+def btn_url(side: str, m: Merchant) -> str:
+    """Custom Buy/Sell URL override, falling back to the merchant profile URL."""
+    custom = (get_settings().get(f"btn_{side}_url") or "").strip()
+    if custom:
+        return (custom
+                .replace("{URL}", m.url or "")
+                .replace("{NICK}", m.nickname or m.merchant_id or "")
+                .replace("{EXCHANGE}", m.exchange)
+                .replace("{ASSET}", ASSET).replace("{FIAT}", FIAT))
+    return m.url
 
 def report_keyboard(prices):
     s = get_settings()
@@ -560,20 +700,18 @@ def report_keyboard(prices):
         r = prices.get(m.key)
         if not r or not m.url:
             continue
-        nick = (m.nickname or m.merchant_id)[:14]
-        row = []
-        sell = r.get("sell")
-        buy = r.get("buy")
-        if sell is not None:
-            label = f"🔴 SELL {fmt(sell)} {nick}"
-            if len(label) > 60:
-                label = f"🔴 SELL {fmt(sell)}"
-            row.append(B(label, url=m.url))
+        sell, buy = r.get("sell"), r.get("buy")
+        buy_btn = sell_btn = None
+        # NOTE: a merchant's BUY ad is where the user sells, and vice-versa —
+        # the labels keep the exchange wording, only their order is configurable.
         if buy is not None:
-            label = f"🟢 BUY {fmt(buy)} {nick}"
-            if len(label) > 60:
-                label = f"🟢 BUY {fmt(buy)}"
-            row.append(B(label, url=m.url))
+            buy_btn = B(render_btn_label(buy_label_tpl(), m, buy, r.get("buy_amount"), "buy"),
+                        url=btn_url("buy", m))
+        if sell is not None:
+            sell_btn = B(render_btn_label(sell_label_tpl(), m, sell, r.get("sell_amount"), "sell"),
+                         url=btn_url("sell", m))
+        pair = [buy_btn, sell_btn] if buttons_order() == "buy_sell" else [sell_btn, buy_btn]
+        row = [b for b in pair if b]
         if row:
             rows.append(row)
     if not rows:
@@ -617,6 +755,11 @@ async def post(bot, force=False):
     snap["_footer"] = s.get("custom_footer","")
     snap["_liq"] = s.get("show_liquidity")
     snap["_btn"] = s.get("show_buttons")
+    snap["_btn_order"] = buttons_order()
+    snap["_btn_buy"] = s.get("btn_buy_label", "")
+    snap["_btn_sell"] = s.get("btn_sell_label", "")
+    snap["_btn_buy_url"] = s.get("btn_buy_url", "")
+    snap["_btn_sell_url"] = s.get("btn_sell_url", "")
     if not force and snap == state["last"]: return False
     state["last"] = snap; save()
 
@@ -710,6 +853,68 @@ async def on_button(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return await q.edit_message_text(custom_menu_text(), parse_mode="HTML", reply_markup=custom_menu_kb())
 
+    elif d == "buttons_menu":
+        await q.answer()
+        return await q.edit_message_text(buttons_menu_text(), parse_mode="HTML", reply_markup=buttons_menu_kb())
+
+    elif d == "toggle_btn_order":
+        state["settings"]["buttons_order"] = "sell_buy" if buttons_order() == "buy_sell" else "buy_sell"
+        save()
+        await q.answer("Buy left / Sell right" if buttons_order() == "buy_sell" else "Sell left / Buy right")
+        try:
+            return await q.edit_message_text(buttons_menu_text(), parse_mode="HTML", reply_markup=buttons_menu_kb())
+        except Exception:
+            pass
+
+    elif d in ("edit_buy_label", "edit_sell_label"):
+        side = "buy" if d == "edit_buy_label" else "sell"
+        c.user_data["awaiting_custom"] = f"{side}_label"
+        icon = "🟢" if side == "buy" else "🔴"
+        default_tpl = DEFAULT_BUY_LABEL if side == "buy" else DEFAULT_SELL_LABEL
+        cur = state["settings"].get(f"btn_{side}_label") or f"{default_tpl}   (default)"
+        await q.answer()
+        return await q.edit_message_text(
+            f"{icon} <b>Send the new {side.upper()} button label</b>\n\n"
+            "Placeholders:\n"
+            "• <code>{PRICE}</code> — the price\n"
+            "• <code>{NICK}</code> — merchant nickname (max 14 chars) · <code>{FULLNICK}</code> — full\n"
+            "• <code>{EXCHANGE}</code> <code>{ICON}</code> — exchange name / emoji\n"
+            "• <code>{AMOUNT}</code> — available liquidity\n"
+            f"• <code>{{ASSET}}</code> = {ASSET} · <code>{{FIAT}}</code> = {FIAT} · <code>{{PAIR}}</code> = {ASSET}/{FIAT}\n"
+            "• <code>{SIDE}</code> = BUY / SELL\n\n"
+            f"Current:\n<code>{html_escape(cur)}</code>\n\n"
+            f"Example:\n<code>{icon} {side.upper()} {{PRICE}} {{FIAT}} · {{NICK}}</code>\n\n"
+            "Send <code>default</code> to restore the default label, or /cancel to abort.",
+            parse_mode="HTML",
+            reply_markup=KB([[B("❌ Cancel", callback_data="cancel_edit")]])
+        )
+
+    elif d in ("edit_buy_url", "edit_sell_url"):
+        side = "buy" if d == "edit_buy_url" else "sell"
+        c.user_data["awaiting_custom"] = f"{side}_url"
+        icon = "🟢" if side == "buy" else "🔴"
+        cur = state["settings"].get(f"btn_{side}_url") or "(merchant profile URL)"
+        await q.answer()
+        return await q.edit_message_text(
+            f"{icon} <b>Send the new {side.upper()} button link</b>\n\n"
+            "By default the button opens the merchant's profile page.\n"
+            "You can send your own link (e.g. your support chat or a referral page).\n\n"
+            "Placeholders: <code>{URL}</code> <code>{NICK}</code> <code>{EXCHANGE}</code> "
+            "<code>{ASSET}</code> <code>{FIAT}</code>\n\n"
+            f"Current:\n<code>{html_escape(cur)}</code>\n\n"
+            "Send <code>default</code> to go back to the merchant profile URL, or /cancel to abort.",
+            parse_mode="HTML",
+            reply_markup=KB([[B("❌ Cancel", callback_data="cancel_edit")]])
+        )
+
+    elif d == "reset_buttons":
+        for k in ("btn_buy_label", "btn_sell_label", "btn_buy_url", "btn_sell_url"):
+            state["settings"][k] = ""
+        state["settings"]["buttons_order"] = DEFAULT_SETTINGS["buttons_order"]
+        save()
+        await q.answer("♻️ Buttons reset to default")
+        return await q.edit_message_text(buttons_menu_text(), parse_mode="HTML", reply_markup=buttons_menu_kb())
+
     elif d == "toggle_liquidity":
         state["settings"]["show_liquidity"] = not state["settings"].get("show_liquidity", False)
         save()
@@ -724,10 +929,13 @@ async def on_button(u: Update, c: ContextTypes.DEFAULT_TYPE):
         state["settings"]["show_buttons"] = not state["settings"].get("show_buttons", True)
         save()
         await q.answer(f"Buttons {'ON' if state['settings']['show_buttons'] else 'OFF'}")
+        cur_txt = q.message.text or ""
         try:
-            if "Settings" in (q.message.text or "") or "⚙️" in (q.message.text or ""):
+            if "Buy / Sell buttons" in cur_txt:
+                return await q.edit_message_text(buttons_menu_text(), parse_mode="HTML", reply_markup=buttons_menu_kb())
+            if "Settings" in cur_txt or "⚙️" in cur_txt:
                 return await q.edit_message_text(settings_text(), parse_mode="HTML", reply_markup=settings_kb())
-        except:
+        except Exception:
             pass
 
     elif d == "toggle_autodelete":
