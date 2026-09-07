@@ -10,6 +10,7 @@ build/
 
 # bot data — never commit secrets
 config.json
+config.json.bak
 data.json
 .env
 bot.log

@@ -12,9 +12,13 @@ set -euo pipefail
 #    wget -qO-  .../install.sh | bash -s -- --token 123:ABC --admins 123456 --asset USDT --fiat USD
 #    git clone https://github.com/sarakmacbook/exchange.git && cd exchange && sudo bash install.sh
 #    sudo bash install.sh --token 123:ABC --admins 123456,789012
-#    sudo bash install.sh --reconfigure   # re-run wizard
+#    sudo bash install.sh --reconfigure   # re-ask ALL 5 questions (blank prompts)
 #    sudo bash install.sh --update        # pull + restart
 #    sudo bash install.sh --uninstall     # remove service
+#
+#  --reconfigure is always interactive: it never takes BOT_TOKEN / ADMIN_IDS
+#  from the environment as defaults, it asks every question again from blank,
+#  backs up the old config.json and prints what actually changed.
 # ─────────────────────────────────────────────────────────────
 
 REPO_URL="https://github.com/sarakmacbook/exchange.git"
@@ -62,7 +66,12 @@ Options:
   --asset SYMBOL          Asset, e.g. USDT (default: USDT)
   --fiat CODE             Fiat,  e.g. USD  (default: USD)
   --interval SEC          Check interval seconds (default: 60)
-  --reconfigure           Re-run setup even if config.json exists
+  --reconfigure           Ask all 5 setup questions again (blank prompts —
+                          current values are shown masked for reference only,
+                          never used as defaults). Old config.json is backed up
+                          to config.json.bak and the service is restarted.
+                          Aliases: --reconfig, --setup
+  --non-interactive       Never prompt; use flags/env only (fails if incomplete)
   --update                Pull latest code & restart service
   --uninstall             Remove service & keep data
   --help                  Show this help
@@ -75,6 +84,7 @@ Examples:
   curl -fsSL $RAW_URL/install.sh | bash -s -- --token 123:ABC --admins 123456
   wget -qO-  $RAW_URL/install.sh | bash -s -- --token 123:ABC --admins 123456
   sudo bash install.sh --dir /opt/p2p-bot --asset BTC --fiat EUR
+  sudo bash install.sh --reconfigure          # interactive: answer all 5 again
 
 Downloads use curl, wget or python3 — whichever is installed
 (force one with:  DOWNLOADER=wget bash install.sh ...)
@@ -90,7 +100,7 @@ while [[ $# -gt 0 ]]; do
     --asset)      ARG_ASSET="$2"; shift 2;;
     --fiat)       ARG_FIAT="$2"; shift 2;;
     --interval)   ARG_INTERVAL="$2"; shift 2;;
-    --reconfigure) RECONFIGURE=1; shift;;
+    --reconfigure|--reconfig|--setup) RECONFIGURE=1; shift;;
     --update)     DO_UPDATE=1; shift;;
     --uninstall)  DO_UNINSTALL=1; shift;;
     --non-interactive) NON_INTERACTIVE=1; shift;;
@@ -352,24 +362,71 @@ CONFIG_FILE="$INSTALL_DIR/config.json"
 NEED_SETUP=0
 if [[ ! -f "$CONFIG_FILE" ]]; then NEED_SETUP=1; fi
 if [[ $RECONFIGURE -eq 1 ]]; then NEED_SETUP=1; fi
-if [[ $DO_UPDATE -eq 1 ]]; then NEED_SETUP=0; fi # don't prompt on --update
+# --update alone must not prompt, but  --update --reconfigure  still asks
+if [[ $DO_UPDATE -eq 1 && $RECONFIGURE -eq 0 ]]; then NEED_SETUP=0; fi
 
-# Helper: validate token looks plausible
-valid_token() { [[ "$1" == *":"* && ${#1} -gt 20 ]]; }
-valid_admins() { [[ "$1" =~ ^[0-9,\ ]+$ ]]; }
+# ── validators (shared by the wizards and the non-interactive path) ──
+valid_token()    { [[ "$1" == *":"* && ${#1} -gt 20 ]]; }
+valid_admins()   { local v="${1//[[:space:]]/}"; [[ "$v" =~ ^[0-9]+(,[0-9]+)*$ ]]; }
+valid_symbol()   { [[ "$1" =~ ^[A-Za-z0-9]{2,12}$ ]]; }
+valid_interval() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 5 && 10#$1 <= 86400 )); }
 
-# Non-interactive fast path: if args/env provided, write config directly
-try_write_from_args() {
-  local tok="${ARG_TOKEN:-}" admins="${ARG_ADMINS:-}" asset="${ARG_ASSET:-USDT}" fiat="${ARG_FIAT:-USD}" interval="${ARG_INTERVAL:-60}"
-  # fall back to existing config values if reconfigure but arg not given? No, require both.
-  if [[ -n "$tok" && -n "$admins" ]]; then
-    if ! valid_token "$tok"; then err "Token looks invalid (should contain ':' and be longer)."; return 1; fi
-    if ! valid_admins "$admins"; then err "Admins should be comma-separated numeric IDs."; return 1; fi
-    asset="${asset^^}"; fiat="${fiat^^}"
-    interval="${interval//[^0-9]/}"; [[ -z "$interval" ]] && interval=60
-    # strip spaces from admins
-    admins="$(echo "$admins" | tr -d ' ')"
-    cat > "$CONFIG_FILE" <<EOF
+# ── what is configured right now (reference + backup only, NEVER a default) ──
+EX_TOKEN=""; EX_ADMINS=""; EX_ASSET=""; EX_FIAT=""; EX_INTERVAL=""
+read_existing_config() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  local out
+  out="$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for k in ("token", "admins", "asset", "fiat", "interval"):
+    v = c.get(k, "")
+    print("" if v is None else v)
+PY
+)"
+  [[ -n "$out" ]] || return 0
+  EX_TOKEN="$(sed -n '1p' <<<"$out")"
+  EX_ADMINS="$(sed -n '2p' <<<"$out")"
+  EX_ASSET="$(sed -n '3p' <<<"$out")"
+  EX_FIAT="$(sed -n '4p' <<<"$out")"
+  EX_INTERVAL="$(sed -n '5p' <<<"$out")"
+}
+
+# mask_token TOK — show enough to recognise a token without printing it whole
+mask_token() {
+  local t="${1:-}"
+  if [[ -z "$t" ]]; then echo "(none)"
+  elif (( ${#t} <= 14 )); then echo "****"
+  else echo "${t:0:9}…${t: -4}"
+  fi
+}
+
+backup_config() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  cp -p "$CONFIG_FILE" "$CONFIG_FILE.bak" 2>/dev/null || return 0
+  chmod 600 "$CONFIG_FILE.bak" 2>/dev/null || true
+  info "Previous config backed up → $CONFIG_FILE.bak"
+}
+
+# write_config — the single writer for config.json (used by every path below)
+write_config() {
+  local tok="${ARG_TOKEN:-}" admins="${ARG_ADMINS:-}"
+  local asset="${ARG_ASSET:-USDT}" fiat="${ARG_FIAT:-USD}" interval="${ARG_INTERVAL:-60}"
+  [[ -n "$tok" && -n "$admins" ]] || { err "Both a bot token and admin ID(s) are required."; return 1; }
+  valid_token "$tok"       || { err "Token looks invalid (should contain ':' and be longer than 20 chars)."; return 1; }
+  valid_admins "$admins"   || { err "Admins should be comma-separated numeric IDs."; return 1; }
+  valid_symbol "$asset"    || { err "Asset should be 2-12 letters/numbers (e.g. USDT)."; return 1; }
+  valid_symbol "$fiat"     || { err "Fiat should be 2-12 letters/numbers (e.g. USD)."; return 1; }
+  admins="${admins//[[:space:]]/}"
+  asset="${asset^^}"; fiat="${fiat^^}"
+  interval="${interval//[^0-9]/}"; [[ -z "$interval" ]] && interval=60
+  valid_interval "$interval" || { err "Interval must be a whole number of seconds, 5-86400."; return 1; }
+
+  backup_config
+  cat > "$CONFIG_FILE" <<EOF
 {
  "token": "$tok",
  "admins": "$admins",
@@ -378,30 +435,112 @@ try_write_from_args() {
  "interval": $interval
 }
 EOF
-    chmod 600 "$CONFIG_FILE"
-    ok "Config written from CLI/env → $CONFIG_FILE"
-    echo "  asset=$asset fiat=$fiat interval=${interval}s admins=$admins"
-    return 0
-  fi
-  return 1
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  ARG_TOKEN="$tok"; ARG_ADMINS="$admins"; ARG_ASSET="$asset"; ARG_FIAT="$fiat"; ARG_INTERVAL="$interval"
+  return 0
 }
 
-# Ask helper for interactive mode
-ask() {
-  local prompt="$1" default="${2:-}" var
-  if [[ -n "$default" ]]; then prompt="$prompt [$default]"; fi
-  prompt="$prompt: "
-  read -r -p "$prompt" var || true
-  var="${var:-$default}"
-  echo "$var"
+# Non-interactive fast path: flags/env only (no TTY, or --non-interactive)
+try_write_from_args() {
+  [[ -n "${ARG_TOKEN:-}" && -n "${ARG_ADMINS:-}" ]] || return 1
+  write_config || return 1
+  ok "Config written from CLI/env → $CONFIG_FILE"
+  echo "  asset=$ARG_ASSET fiat=$ARG_FIAT interval=${ARG_INTERVAL}s admins=$ARG_ADMINS"
 }
+
+# ── prompt helpers ──
+# These set the global ANSWER instead of echoing into $(...): a command
+# substitution would swallow the ❌ messages into the captured value, and would
+# make Ctrl-D / a closed tty loop forever.
+trim() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v"; }
+
+# ask_req PROMPT VALIDATOR HINT — used by --reconfigure: no default, blank rejected
+ask_req() {
+  local prompt="$1" validator="$2" hint="$3"
+  while true; do
+    ANSWER=""
+    if ! read -r -p "$prompt: " ANSWER; then
+      echo ""
+      err "Input ended (Ctrl-D) — aborting. $CONFIG_FILE was not modified."
+      exit 1
+    fi
+    ANSWER="$(trim "$ANSWER")"
+    if [[ -z "$ANSWER" ]]; then echo -e "${RED}  ❌ Blank is not accepted — $hint${NC}"; continue; fi
+    if "$validator" "$ANSWER"; then return 0; fi
+    echo -e "${RED}  ❌ Invalid — $hint${NC}"
+  done
+}
+
+# ask_def PROMPT VALIDATOR HINT [DEFAULT] — used by first-time setup: Enter keeps DEFAULT
+ask_def() {
+  local prompt="$1" validator="$2" hint="$3" default="${4:-}"
+  local shown="$prompt: "
+  [[ -n "$default" ]] && shown="$prompt [$default]: "
+  while true; do
+    ANSWER=""
+    if ! read -r -p "$shown" ANSWER; then
+      echo ""
+      ANSWER="$(trim "$default")"
+      if [[ -n "$ANSWER" ]] && "$validator" "$ANSWER"; then
+        warn "Input ended (Ctrl-D) — keeping default: $ANSWER"; return 0
+      fi
+      err "Input ended (Ctrl-D) and there is no usable default — aborting."
+      exit 1
+    fi
+    ANSWER="$(trim "$ANSWER")"
+    [[ -z "$ANSWER" ]] && ANSWER="$(trim "$default")"
+    if [[ -z "$ANSWER" ]]; then echo -e "${RED}  ❌ Blank is not accepted — $hint${NC}"; continue; fi
+    if "$validator" "$ANSWER"; then return 0; fi
+    echo -e "${RED}  ❌ Invalid — $hint${NC}"
+  done
+}
+
+# report_changes — old → new diff shown after a reconfigure
+report_changes() {
+  [[ -n "$EX_TOKEN$EX_ADMINS" ]] || return 0
+  echo -e "  ${BOLD}Changes:${NC}"
+  if [[ "$EX_TOKEN" != "$ARG_TOKEN" ]]; then
+    echo -e "    token     $(mask_token "$EX_TOKEN") → $(mask_token "$ARG_TOKEN")"
+  else echo -e "    ${DIM}token     unchanged ($(mask_token "$ARG_TOKEN"))${NC}"; fi
+  if [[ "$EX_ADMINS" != "$ARG_ADMINS" ]]; then
+    echo -e "    admins    ${EX_ADMINS} → ${ARG_ADMINS}"
+  else echo -e "    ${DIM}admins    unchanged (${ARG_ADMINS})${NC}"; fi
+  if [[ "$EX_ASSET" != "$ARG_ASSET" || "$EX_FIAT" != "$ARG_FIAT" ]]; then
+    echo -e "    pair      ${EX_ASSET}/${EX_FIAT} → ${ARG_ASSET}/${ARG_FIAT}"
+  else echo -e "    ${DIM}pair      unchanged (${ARG_ASSET}/${ARG_FIAT})${NC}"; fi
+  if [[ "$EX_INTERVAL" != "$ARG_INTERVAL" ]]; then
+    echo -e "    interval  ${EX_INTERVAL}s → ${ARG_INTERVAL}s"
+  else echo -e "    ${DIM}interval  unchanged (${ARG_INTERVAL}s)${NC}"; fi
+}
+
+read_existing_config
 
 if [[ $NEED_SETUP -eq 1 ]]; then
-  # try non-interactive first
-  if try_write_from_args; then
+  if [[ $RECONFIGURE -eq 1 && -t 0 && $NON_INTERACTIVE -eq 0 ]]; then
+    # ── reconfigure: always ask, always blank (env/CLI values are NOT defaults) ──
+    echo ""
+    echo -e "${BOLD}🔧 Reconfigure — all 5 questions are asked again${NC}"
+    if [[ -n "$EX_TOKEN$EX_ADMINS" ]]; then
+      echo -e "${DIM}  Current → token=$(mask_token "$EX_TOKEN")  admins=${EX_ADMINS:-(none)}  pair=${EX_ASSET:-?}/${EX_FIAT:-?}  interval=${EX_INTERVAL:-?}s${NC}"
+    else
+      warn "No readable $CONFIG_FILE yet — answering these questions will create one."
+    fi
+    echo -e "${DIM}  Nothing is pre-filled: type every value again — blank answers are rejected.${NC}"
+    echo -e "${DIM}  Get bot token from @BotFather on Telegram → /newbot${NC}"
+    echo -e "${DIM}  Get your user ID from @userinfobot on Telegram${NC}"
+    echo ""
+    ask_req "Bot token from @BotFather" valid_token "must look like 123456:ABC-... (contains ':' and is 20+ chars)"; ARG_TOKEN="$ANSWER"
+    ask_req "Your Telegram user ID(s), comma-separated" valid_admins "numeric IDs, e.g. 123456 or 123456,789012"; ARG_ADMINS="$ANSWER"
+    ask_req "Asset (e.g. USDT)" valid_symbol "2-12 letters/numbers, e.g. USDT"; ARG_ASSET="$ANSWER"
+    ask_req "Fiat currency (e.g. USD)" valid_symbol "2-12 letters/numbers, e.g. USD"; ARG_FIAT="$ANSWER"
+    ask_req "Check prices every N seconds (5-86400)" valid_interval "a whole number of seconds between 5 and 86400"; ARG_INTERVAL="$ANSWER"
+    write_config || { err "Could not save configuration — nothing was changed."; exit 1; }
+    ok "Saved to $CONFIG_FILE"
+    report_changes
+  elif try_write_from_args; then
     :
   elif [[ ! -t 0 || $NON_INTERACTIVE -eq 1 ]]; then
-    err "config.json not found and no --token/--admins provided in non-interactive mode."
+    err "No terminal to ask on, and no complete --token/--admins given."
     echo ""
     echo "  Provide them via flags or env:"
     echo "    curl -fsSL $RAW_URL/install.sh | bash -s -- --token 123:ABC --admins 123456"
@@ -410,38 +549,21 @@ if [[ $NEED_SETUP -eq 1 ]]; then
     echo ""
     echo "  Or run interactively on the VPS:"
     echo "    bash install.sh"
-    echo "    sudo bash install.sh --reconfigure"
+    echo "    sudo bash install.sh --reconfigure   # asks all 5 questions again"
     exit 1
   else
-    # interactive wizard
+    # ── first-time interactive wizard (flag/env values act as defaults) ──
     echo ""
     echo -e "${BOLD}🤖 First-time setup — you will be asked 5 questions${NC}"
     echo -e "${DIM}  Get bot token from @BotFather on Telegram → /newbot${NC}"
     echo -e "${DIM}  Get your user ID from @userinfobot on Telegram${NC}"
     echo ""
-    while true; do
-      TOK_INPUT="$(ask "Bot token from @BotFather" "${ARG_TOKEN:-}")"
-      if valid_token "$TOK_INPUT"; then ARG_TOKEN="$TOK_INPUT"; break; else echo -e "${RED}  ❌ Token should look like 123456:ABC... — try again${NC}"; fi
-    done
-    while true; do
-      ADM_INPUT="$(ask "Your Telegram user ID(s), comma-separated" "${ARG_ADMINS:-}")"
-      if valid_admins "$ADM_INPUT"; then ARG_ADMINS="$ADM_INPUT"; break; else echo -e "${RED}  ❌ Should be numbers like 123456 or 123,456${NC}"; fi
-    done
-    ARG_ASSET="$(ask "Asset" "${ARG_ASSET:-USDT}")"; ARG_ASSET="${ARG_ASSET^^}"; [[ -z "$ARG_ASSET" ]] && ARG_ASSET="USDT"
-    ARG_FIAT="$(ask "Fiat currency" "${ARG_FIAT:-USD}")"; ARG_FIAT="${ARG_FIAT^^}"; [[ -z "$ARG_FIAT" ]] && ARG_FIAT="USD"
-    ARG_INTERVAL="$(ask "Check prices every N seconds" "${ARG_INTERVAL:-60}")"; ARG_INTERVAL="${ARG_INTERVAL//[^0-9]/}"; [[ -z "$ARG_INTERVAL" ]] && ARG_INTERVAL=60
-
-    ARG_ADMINS="$(echo "$ARG_ADMINS" | tr -d ' ')"
-    cat > "$CONFIG_FILE" <<EOF
-{
- "token": "$ARG_TOKEN",
- "admins": "$ARG_ADMINS",
- "asset": "$ARG_ASSET",
- "fiat": "$ARG_FIAT",
- "interval": $ARG_INTERVAL
-}
-EOF
-    chmod 600 "$CONFIG_FILE"
+    ask_def "Bot token from @BotFather" valid_token "must look like 123456:ABC-... (contains ':' and is 20+ chars)" "${ARG_TOKEN:-}"; ARG_TOKEN="$ANSWER"
+    ask_def "Your Telegram user ID(s), comma-separated" valid_admins "numeric IDs, e.g. 123456 or 123456,789012" "${ARG_ADMINS:-}"; ARG_ADMINS="$ANSWER"
+    ask_def "Asset" valid_symbol "2-12 letters/numbers, e.g. USDT" "${ARG_ASSET:-USDT}"; ARG_ASSET="$ANSWER"
+    ask_def "Fiat currency" valid_symbol "2-12 letters/numbers, e.g. USD" "${ARG_FIAT:-USD}"; ARG_FIAT="$ANSWER"
+    ask_def "Check prices every N seconds" valid_interval "a whole number of seconds between 5 and 86400" "${ARG_INTERVAL:-60}"; ARG_INTERVAL="$ANSWER"
+    write_config || { err "Could not save configuration."; exit 1; }
     ok "Saved to $CONFIG_FILE"
   fi
 else
@@ -596,7 +718,7 @@ echo -e "   ${DIM}sudo journalctl -u $SERVICE_NAME -f${NC}      — live logs"
 echo -e "   ${DIM}sudo systemctl restart $SERVICE_NAME${NC}     — restart"
 echo -e "   ${DIM}sudo systemctl stop $SERVICE_NAME${NC}        — stop"
 fi
-echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --reconfigure${NC}  — change token/pair"
+echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --reconfigure${NC}  — re-ask all 5 setup questions"
 echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --update${NC}       — update to latest"
 echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --uninstall${NC}    — remove service"
 echo ""
