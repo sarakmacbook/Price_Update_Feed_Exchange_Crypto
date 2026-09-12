@@ -8,9 +8,10 @@ set -euo pipefail
 #  via launchd (macOS) or cron @reboot (Linux).
 #
 #  Usage (curl or wget — whichever your machine has):
-#    curl -fsSL https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-local.sh | bash
-#    wget -qO-  https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-local.sh | bash
-#    git clone https://github.com/sarakmacbook/exchange.git && cd exchange && bash install-local.sh
+#    curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-local.sh | bash
+#    wget -qO-  https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-local.sh | bash
+#    git clone https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot.git
+#    cd OKX_Telegram_P2P_Price_Bot && bash install-local.sh
 #    bash install-local.sh --token 123:ABC --admins 123456 --asset USDT --fiat USD
 #    bash install-local.sh --reconfigure    # re-run setup wizard
 #    bash install-local.sh --update         # pull + update + restart
@@ -18,9 +19,16 @@ set -euo pipefail
 #    bash install-local.sh --uninstall      # stop + remove autostart (keep data)
 # ─────────────────────────────────────────────────────────────
 
-REPO_URL="https://github.com/sarakmacbook/exchange.git"
-RAW_URL="https://raw.githubusercontent.com/sarakmacbook/exchange/main"
-TARBALL_URL="https://codeload.github.com/sarakmacbook/exchange/tar.gz/refs/heads/main"
+# ── Where the source lives ───────────────────────────────────────────────
+# NOTE: this repository used to be called "sarakmacbook/exchange".  GitHub
+# redirects the human-facing pages, but *not* raw.githubusercontent.com, so a
+# stale slug answers the download with a 404 page, and bash then dies with:
+#     line 7: syntax error near unexpected token `newline'
+# Override after a rename without editing this file:  P2P_REPO_SLUG=owner/name
+REPO_SLUG="${P2P_REPO_SLUG:-sarakmacbook/OKX_Telegram_P2P_Price_Bot}"
+REPO_URL="https://github.com/${REPO_SLUG}.git"
+RAW_URL="https://raw.githubusercontent.com/${REPO_SLUG}/main"
+TARBALL_URL="https://codeload.github.com/${REPO_SLUG}/tar.gz/refs/heads/main"
 DEFAULT_DIR="$HOME/exchange-local"
 
 INSTALL_DIR="$DEFAULT_DIR"
@@ -127,10 +135,63 @@ detect_downloader() {
   fi
 }
 
-# fetch URL DEST — download URL into file DEST
-fetch() {
+# ── download integrity guards ────────────────────────────────────────────
+# Whenever a URL no longer points at a file, GitHub answers with a web page
+# instead of refusing: a renamed repository (raw.githubusercontent.com does
+# NOT follow renames) or a github.com/OWNER/REPO/blob/… link (the HTML viewer
+# rather than the raw file).  Saving that page as install.sh / bot.py is what
+# produces the classic error:
+#     ./install.sh: line 7: syntax error near unexpected token `newline'
+#     ./install.sh: line 7: `<!DOCTYPE html>'
+# so every download is inspected before it is allowed to touch the install dir.
+looks_like_web_page() {
+  head -c 512 "$1" 2>/dev/null | tr -d '\r\n' \
+    | LC_ALL=C grep -asiE '<!doctype html|<html[ >]|^404: not found|<\?xml' >/dev/null
+}
+
+looks_like_gzip() {   # a gzip archive starts with the magic bytes 1f 8b
+  local magic
+  need_cmd od || return 0   # no od available — let tar decide for itself
+  magic="$(head -c 2 "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
+  [[ "$magic" == "1f8b" ]]
+}
+
+# guard_download DEST URL — reject empty, HTML or non-archive payloads
+guard_download() {
+  local dest="$1" url="$2" name
+  name="$(basename "$dest")"
+  if [[ ! -s "$dest" ]]; then
+    err "Download failed — received an empty file from:"
+    echo "    $url" >&2
+    return 1
+  fi
+  case "$url" in
+    *tar.gz*|*tgz*)                      # archives are verified by magic bytes only
+      if ! looks_like_gzip "$dest"; then
+        err "Refusing to unpack '$name' — not a gzip archive (probably an error page)."
+        echo "    URL: $url" >&2
+        return 1
+      fi
+      return 0
+      ;;
+  esac
+  if looks_like_web_page "$dest"; then
+    err "Refusing to install '$name' — the download is a web page, not a file."
+    echo "    URL: $url" >&2
+    echo "  Usual causes:" >&2
+    echo "    1. the URL is a github.com/OWNER/REPO/blob/… page — use raw.githubusercontent.com" >&2
+    echo "    2. the repository was renamed — raw URLs do not follow renames (they return 404)" >&2
+    echo "  This installer expects the sources under:" >&2
+    echo "    $RAW_URL" >&2
+    echo "  Point the installer at the right repository with: P2P_REPO_SLUG=owner/repo" >&2
+    return 1
+  fi
+  return 0
+}
+
+# download_to URL DEST — transfer with the detected tool (curl / wget / python3)
+download_to() {
   local url="$1" dest="$2"
-  detect_downloader || { err "No downloader found — install curl, wget or python3."; return 1; }
   case "$DOWNLOADER" in
     curl)
       curl -fsSL --connect-timeout 15 --retry 3 "$url" -o "$dest" ;;
@@ -150,6 +211,23 @@ PY
   esac
 }
 
+# fetch URL DEST — download URL into file DEST (never keeps an HTML error page)
+fetch() {
+  local url="$1" dest="$2"
+  detect_downloader || { err "No downloader found — install curl, wget or python3."; return 1; }
+  if ! download_to "$url" "$dest"; then
+    err "Download failed ($DOWNLOADER exited non-zero):"
+    echo "    $url" >&2
+    rm -f "$dest"
+    return 1
+  fi
+  if ! guard_download "$dest" "$url"; then
+    rm -f "$dest"
+    return 1
+  fi
+  return 0
+}
+
 # fetch_repo DEST — download the repo tarball and unpack it into DEST
 # (fallback when git is missing or the clone fails)
 fetch_repo() {
@@ -163,6 +241,7 @@ fetch_repo() {
       ok "Source downloaded via ${DOWNLOADER} tarball → $dest"
       return 0
     fi
+    err "Could not unpack the archive from $TARBALL_URL"
   fi
   rm -f "$tmp"
   return 1
