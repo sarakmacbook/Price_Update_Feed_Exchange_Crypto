@@ -15,7 +15,8 @@ set -euo pipefail
 #    sudo bash install.sh --token 123:ABC --admins 123456,789012
 #    sudo bash install.sh --reconfigure   # re-ask ALL 5 questions (blank prompts)
 #    sudo bash install.sh --update        # pull + restart
-#    sudo bash install.sh --uninstall     # remove service
+#    sudo bash install.sh --uninstall     # uninstall — asks: erase everything
+#                                          # or save config.json + data.json
 #
 #  --reconfigure is always interactive: it never takes BOT_TOKEN / ADMIN_IDS
 #  from the environment as defaults, it asks every question again from blank,
@@ -81,7 +82,8 @@ Options:
                           Aliases: --reconfig, --setup
   --non-interactive       Never prompt; use flags/env only (fails if incomplete)
   --update                Pull latest code & restart service
-  --uninstall             Remove service & keep data
+  --uninstall             Uninstall — asks: erase EVERYTHING install.sh did
+                          or save config.json + data.json to a backup folder
   --help                  Show this help
 
 Env alternatives: BOT_TOKEN, ADMIN_IDS, ASSET, FIAT, INTERVAL
@@ -117,24 +119,6 @@ while [[ $# -gt 0 ]]; do
     *) err "Unknown option: $1"; usage; exit 1;;
   esac
 done
-
-# Handle uninstall early
-if [[ $DO_UNINSTALL -eq 1 ]]; then
-  exec bash "$(dirname "$0")/uninstall.sh" 2>/dev/null || {
-    echo "Uninstalling $SERVICE_NAME ..."
-    if systemctl list-units --type=service 2>/dev/null | grep -q "$SERVICE_NAME"; then
-      sudo systemctl stop "$SERVICE_NAME" || true
-      sudo systemctl disable "$SERVICE_NAME" || true
-      sudo rm -f "$SERVICE_FILE"
-      sudo systemctl daemon-reload || true
-      ok "Service removed."
-    else
-      warn "Service not found."
-    fi
-    echo "Data kept in $INSTALL_DIR (remove manually if wanted: rm -rf $INSTALL_DIR)"
-    exit 0
-  }
-fi
 
 # ── helpers ──
 have_sudo() { [[ $EUID -eq 0 ]] || sudo -n true 2>/dev/null || sudo -v 2>/dev/null; }
@@ -282,6 +266,41 @@ if [[ -f "$SCRIPT_DIR/bot.py" && -f "$SCRIPT_DIR/requirements.txt" ]]; then
   HAS_LOCAL_REPO=1
 fi
 
+# ── Handle uninstall early ────────────────────────────────────────────────
+# The real uninstaller asks whether to erase EVERYTHING install.sh created or
+# to save config.json + data.json into a backup folder first.  It lives next
+# to this script in the repo; when install.sh itself was piped (curl | bash)
+# and there is no local copy, it is fetched from the same source.
+# No --dir is forced here: uninstall.sh finds the install directory itself
+# (from the systemd service, the current directory, or the usual locations).
+if [[ $DO_UNINSTALL -eq 1 ]]; then
+  UNINSTALLER="$SCRIPT_DIR/uninstall.sh"
+  if [[ ! -f "$UNINSTALLER" ]] && detect_downloader; then
+    _tmp_un="$(mktemp "${TMPDIR:-/tmp}/p2p-uninstall.XXXXXX.sh")" || _tmp_un=""
+    if [[ -n "${_tmp_un:-}" ]] && fetch "$RAW_URL/uninstall.sh" "$_tmp_un"; then
+      UNINSTALLER="$_tmp_un"
+    fi
+  fi
+  if [[ -f "$UNINSTALLER" ]]; then
+    exec bash "$UNINSTALLER"
+  fi
+  # last resort (no uninstaller available): remove the service inline
+  echo "Uninstalling $SERVICE_NAME ..."
+  if systemctl list-units --type=service 2>/dev/null | grep -q "$SERVICE_NAME"; then
+    sudo systemctl stop "$SERVICE_NAME" || true
+    sudo systemctl disable "$SERVICE_NAME" || true
+    sudo rm -f "$SERVICE_FILE"
+    sudo systemctl daemon-reload || true
+    ok "Service removed."
+  else
+    warn "Service not found."
+  fi
+  echo "Data kept in $INSTALL_DIR (remove manually if wanted: rm -rf $INSTALL_DIR)"
+  echo "For the full uninstaller (asks: erase everything or keep the json data):"
+  echo "  curl -fsSL $RAW_URL/uninstall.sh | bash"
+  exit 0
+fi
+
 banner() {
 cat <<'BANNER'
  ____  ____  ____      ____        _
@@ -297,7 +316,7 @@ echo -e "${DIM}Ubuntu 20.04 / 22.04 / 24.04 · Binance · Bybit · OKX · Bitget
 # ── Reopen stdin from /dev/tty if piped (curl | bash / wget | bash) so prompts work ──
 # If there is no controlling TTY, keep stdin as-is (args/env mode).
 if [[ ! -t 0 ]]; then
-  exec < /dev/tty 2>/dev/null || true
+  { exec < /dev/tty; } 2>/dev/null || true
 fi
 
 # ── 1. banner & checks ──
@@ -801,7 +820,7 @@ echo -e "   ${DIM}sudo systemctl stop $SERVICE_NAME${NC}        — stop"
 fi
 echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --reconfigure${NC}  — re-ask all 5 setup questions"
 echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --update${NC}       — update to latest"
-echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --uninstall${NC}    — remove service"
+echo -e "   ${DIM}sudo bash $INSTALL_DIR/install.sh --uninstall${NC}    — uninstall (asks what to keep)"
 echo ""
 if is_systemd; then
   echo -e "${DIM}── last 15 log lines ──${NC}"

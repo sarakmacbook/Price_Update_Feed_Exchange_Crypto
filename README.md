@@ -33,6 +33,16 @@ curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price
 bash uninstall.sh
 ```
 
+The uninstaller **asks what to remove**:
+
+| Choice | What happens |
+|---|---|
+| **1) Erase EVERYTHING** | Removes everything `install.sh` created: systemd service, bot process, cron entry, the whole install directory — **including `config.json` and `data.json`** |
+| **2) Keep my data** | Same, but `config.json` + `data.json` (+ `.env`) are saved to a `~/p2p-bot-backup-<date>/` folder first, so a later reinstall starts where you left off |
+| **3) Cancel** | Removes nothing |
+
+Non-interactive: `bash uninstall.sh --full` (erase everything), `bash uninstall.sh --keep-data` (save the json data), add `--yes` to skip the confirmation. Without a terminal it always keeps the data. apt packages (`python3`, `git`, `curl`, …) are never removed — other software may need them.
+
 
 # 🤖 P2P Merchant Price Bot
 
@@ -50,7 +60,6 @@ Pick the installer that matches your machine — all four ask for your **bot tok
 | `install-docker.sh` | Any machine **with Docker**, incl. macOS | Docker Compose container (`restart: unless-stopped`) |
 | `install-local.sh` | **macOS / Linux without systemd / WSL** | venv + nohup + launchd (macOS) or cron `@reboot` autostart |
 | **python3 one-liner** | **Any machine with Python 3** (no curl / wget needed) | Downloads + runs `install-local.sh` in one command |
-| **`vercel.json`** | **Vercel (serverless)** — no server at all | Webhook bot + `/api/cron` endpoint, state in Vercel KV/Upstash — see [Deploy on Vercel](#-deploy-on-vercel) |
 
 > **curl or wget — your choice.** Every one-liner below is shown with both `curl` and `wget`; they are interchangeable. Inside the scripts the same applies: downloads automatically use **curl → wget → python3**, whichever exists on the box, and `git` is optional (a tarball is fetched instead when git is missing). Force a specific tool with `DOWNLOADER=wget`.
 
@@ -97,15 +106,6 @@ python3 -c "import urllib.request as u;print(u.urlopen('https://raw.githubuserco
 ```
 
 > This is the same local / no-systemd install as **Option C**, just launched by Python instead of `curl` or `wget`.
-
-### Option E — Vercel (serverless, no VPS)
-
-One click, no server to babysit:
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsarakmacbook%2FOKX_Telegram_P2P_Price_Bot&env=BOT_TOKEN,ADMIN_IDS,CRON_SECRET&envDescription=BOT_TOKEN%20from%20%40BotFather%2C%20ADMIN_IDS%20from%20%40userinfobot%2C%20CRON_SECRET%20protects%20%2Fapi%2Fcron&project-name=p2p-price-bot)
-
-Full walkthrough (environment variables, Redis/KV state, webhook registration and the
-free scheduler): **[Deploy on Vercel](#-deploy-on-vercel)**.
 
 <details>
 <summary>No curl and no wget? (python3 / PowerShell / manual)</summary>
@@ -301,87 +301,6 @@ The bot deletes Telegram’s **“X joined the group”** and **“X left the gr
 
 ---
 
-## ▲ Deploy on Vercel
-
-The bot runs on Vercel as a **webhook** bot: Telegram pushes every update to
-`POST /api/telegram`, and a scheduled tick hits `GET /api/cron` to publish prices and do the
-housekeeping. No server, no polling process — the price checks run inside the function.
-
-### 1. Deploy
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsarakmacbook%2FOKX_Telegram_P2P_Price_Bot&env=BOT_TOKEN,ADMIN_IDS,CRON_SECRET&envDescription=BOT_TOKEN%20from%20%40BotFather%2C%20ADMIN_IDS%20from%20%40userinfobot%2C%20CRON_SECRET%20protects%20%2Fapi%2Fcron&project-name=p2p-price-bot)
-
-or from the CLI:
-
-```bash
-npm i -g vercel
-vercel                      # link / create the project (framework preset: Other)
-vercel --prod               # deploy
-```
-
-### 2. Environment variables
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `BOT_TOKEN` | ✅ | Token from [@BotFather](https://t.me/BotFather) |
-| `ADMIN_IDS` | ✅ | Your Telegram id from [@userinfobot](https://t.me/userinfobot) (comma-separated) |
-| `ASSET` / `FIAT` | – | Pair to watch, default `USDT` / `USD` |
-| `INTERVAL` | – | Seconds between price checks (default `60`) — how often you ping `/api/cron` |
-| `CRON_SECRET` | ✅ | Random string that protects `/api/cron` and `/api/setup` |
-| `WEBHOOK_SECRET` | recommended | Extra check on incoming Telegram updates |
-| `KV_REST_API_URL` + `KV_REST_API_TOKEN` | recommended | Upstash/Redis store so merchants, group and settings survive cold starts |
-| `PUBLIC_URL` | – | Only needed if `/api/setup` should register a domain other than the deployment URL |
-| `AD_LINK_TEMPLATES` | – | JSON overrides for the exact-ad link templates |
-
-> **Without a Redis/KV store** the bot still runs, but Vercel's filesystem is ephemeral: merchants,
-> the group and settings are reset whenever the function cold-starts. In the Vercel dashboard open
-> **Storage → Create → Upstash Redis** (or any Upstash database) and the `KV_REST_API_*` variables
-> are added to the project automatically.
-
-### 3. Register the webhook (once)
-
-```
-https://<your-app>.vercel.app/api/setup?key=<CRON_SECRET>
-```
-
-It calls `setWebhook` (with your `WEBHOOK_SECRET` if set), registers the `/start`, `/preview`,
-`/setgroup`, `/cancel` commands and prints the result. Re-run it whenever the domain changes.
-
-### 4. Schedule the price updates
-
-`INTERVAL` seconds is only a hint — something has to *call* the endpoint:
-
-| Option | Frequency | Where |
-|---|---|---|
-| **Vercel Cron** (Pro) | every minute | add to `vercel.json`: `"crons": [{"path": "/api/cron", "schedule": "* * * * *"}]` — Vercel sends `Authorization: Bearer $CRON_SECRET` |
-| **cron-job.org / UptimeRobot** (free) | 1–5 min | create a monitor for `https://<your-app>.vercel.app/api/cron?key=<CRON_SECRET>` |
-| **GitHub Actions** (free) | ~1 min | use the bundled [`cron-price-update.yml`](.github/workflows/cron-price-update.yml) and add a `CRON_URL` repository secret |
-| **Vercel Cron** (Hobby) | once per day | same `crons` entry, but `schedule` must be daily on the free plan — not useful for prices |
-
-The tick is cheap and idempotent: it only posts when prices actually changed, and it also deletes
-the previous group message / expires messages that are older than `delete_after_hours`.
-
-### Endpoints
-
-| Endpoint | What it does |
-|---|---|
-| `GET /` | Status page: pair, storage backend, group, merchant count, setup checklist |
-| `GET /api/health` | The same status as JSON |
-| `POST /api/telegram` | Telegram webhook (verified with `WEBHOOK_SECRET` when set) |
-| `GET /api/cron?key=…` | Scheduler tick (`?force=1` re-posts even if nothing changed) |
-| `GET /api/setup?key=…` | Registers the webhook with Telegram |
-
-### Notes & limits
-
-* **Hobby plan**: 60 s max function duration, crons only once per day → use an external pinger (table above).
-* Serverless functions sleep when idle: the first update after a while takes ~1 s longer (cold start).
-* Long polling (`python bot.py`, Docker, systemd) still works exactly as before — the same codebase
-  detects Vercel (`VERCEL=1`) and switches to webhook mode automatically.
-* `ADMIN_IDS` is the only thing that can control the bot: keep the deployment URL private-ish, and
-  keep `CRON_SECRET`/`WEBHOOK_SECRET` long and random.
-
----
-
 ## 🧯 Troubleshooting
 
 ### ``syntax error near unexpected token `newline'`` / `` `<!DOCTYPE html>' ``
@@ -445,9 +364,8 @@ pip install -r requirements.txt pytest
 python -m pytest tests -q
 ```
 
-The suite covers the ad-link templates, the Buy/Sell button targets, clickable prices, the
-state backends and the serverless endpoints (including a real HTTP round-trip through
-`api/index.py` — no Telegram calls are made).
+The suite covers the ad-link templates, the Buy/Sell button targets, clickable prices and the
+state backends — no Telegram calls are made.
 
 ---
 
@@ -484,17 +402,26 @@ bash install-local.sh --update        # pull latest + restart
 bash install-local.sh --uninstall     # stop + remove autostart (keep data)
 ```
 
-**Uninstall (keeps your data):**
+**Uninstall (asks: erase everything or keep your data):**
 
 ```bash
-# systemd install
+# systemd install — asks 1) erase EVERYTHING  2) keep config.json + data.json  3) cancel
 curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/uninstall.sh | bash
 # …or the same with wget
 wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/uninstall.sh | bash
+# …or non-interactive:
+bash uninstall.sh --full          # erase everything (incl. config.json + data.json)
+bash uninstall.sh --keep-data     # erase everything but save the json data first
 # docker install
 bash install-docker.sh --down
 # local install
 bash install-local.sh --uninstall
+```
+
+With **2) Keep my data** the json files are copied to `~/p2p-bot-backup-<date>/` before the install directory is removed — reinstall later and drop them back in:
+
+```bash
+cp ~/p2p-bot-backup-*/config.json ~/p2p-bot-backup-*/data.json <install-dir>/
 ```
 
 ---
@@ -506,15 +433,13 @@ bash install-local.sh --uninstall
 | `bot.py` | Telegram bot (panel, buttons, auto-poster) |
 | `exchanges.py` | Binance / Bybit / OKX / Bitget adapters + URL parser |
 | `adlinks.py` | Exact-ad deep-link templates (Binance / Bybit / OKX / Bitget) |
-| `storage.py` | State backends: `data.json` file, Upstash/Vercel-KV Redis, read-only fallback |
-| `api/index.py` | Vercel entry point: Telegram webhook, `/api/cron`, `/api/health`, `/api/setup`, status page |
-| `vercel.json` | Vercel routing (all paths → `api/index.py`) |
-| `tests/` | pytest suite (links, buttons, storage, serverless endpoints) |
-| `.github/workflows/` | CI (tests) + optional free scheduler that pings `/api/cron` |
+| `storage.py` | State backends: `data.json` file, optional Upstash/Redis REST, read-only fallback |
+| `tests/` | pytest suite (links, buttons, storage) |
+| `.github/workflows/` | CI (tests) |
 | `install.sh` | One-click installer — systemd VPS |
 | `install-docker.sh` | One-click installer — Docker Compose |
 | `install-local.sh` | One-click installer — macOS / no systemd |
-| `uninstall.sh` | Remove systemd service (keeps data) |
+| `uninstall.sh` | Interactive uninstaller — asks: erase everything or keep your data |
 | `Dockerfile` / `docker-compose.yml` | Docker alternative |
 | `config.json` | Auto-created: token, admins, pair, interval |
 | `data.json` | Auto-created: group, merchants, last prices |

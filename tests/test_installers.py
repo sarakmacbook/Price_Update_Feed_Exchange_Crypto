@@ -144,6 +144,35 @@ def test_documented_installers_all_exist():
 
 # ── functional check of the guard ─────────────────────────────────────────
 
+# ── the uninstaller: ask before deleting data ────────────────────────────
+
+def test_uninstaller_asks_full_erase_or_keep_data():
+    """uninstall.sh must offer both: complete erase and data-saving uninstall."""
+    text = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
+    assert "--full" in text, "uninstall.sh: missing --full (erase everything)"
+    assert "--keep-data" in text, "uninstall.sh: missing --keep-data (save the json data)"
+    for data_file in ("config.json", "data.json"):
+        assert data_file in text, f"uninstall.sh: never mentions {data_file}"
+    # the interactive menu offers erase-everything / keep-data / cancel
+    assert re.search(r"Choose \[1/2/3\]", text), "uninstall.sh: the 1/2/3 ask is gone"
+
+
+def test_uninstaller_defaults_to_keeping_data_without_a_terminal():
+    """Headless runs (curl | bash with no tty) must never destroy the json data."""
+    text = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
+    assert re.search(r"No terminal[^\n]*defaulting to KEEPING", text), \
+        "uninstall.sh: headless default must keep the data"
+    # everything install.sh did is reversed either way
+    assert "systemctl stop" in text and "systemctl disable" in text
+    assert "rm -rf" in text and "pkill" in text and "crontab" in text
+
+
+def test_install_uninstall_delegates_to_the_uninstaller():
+    """`install.sh --uninstall` must run uninstall.sh so it asks the same question."""
+    text = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "uninstall.sh" in text, "install.sh --uninstall no longer uses uninstall.sh"
+
+
 GUARD_HARNESS = """
 set -u
 err()  { echo "ERR: $*" >&2; }
