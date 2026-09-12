@@ -20,6 +20,11 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# behave like the deployed function: config errors are reported instead of
+# exiting the process (set P2P_SERVERLESS=0 to force local/exit behaviour)
+os.environ.setdefault("P2P_SERVERLESS", "1")
+
 from api.index import handler  # noqa: E402  (needs the path above)
 
 if __name__ == "__main__":

@@ -140,3 +140,21 @@ def test_authorized_requires_the_secret(api, monkeypatch):
     monkeypatch.delenv("CRON_SECRET", raising=False)
     monkeypatch.setenv("BOT_TOKEN", "123456:TEST-TOKEN")
     assert api.authorized({"key": ["123456:TEST-TOKEN"]}, {}) is True
+
+
+def test_bot_import_failure_is_reported_not_fatal(api, monkeypatch):
+    """A missing/misconfigured environment must render the checklist, not crash."""
+    api._bot_module, api._bot_error = None, None
+    monkeypatch.setenv("P2P_SERVERLESS", "1")
+    monkeypatch.delenv("BOT_TOKEN", raising=False)
+    monkeypatch.delenv("ADMIN_IDS", raising=False)
+    import sys as _sys
+    saved = {k: _sys.modules.pop(k) for k in ("bot", "exchanges", "adlinks", "storage") if k in _sys.modules}
+    monkeypatch.setenv("P2P_CONFIG_FILE", "/nonexistent/config.json")
+    try:
+        assert api.get_bot() is None
+        assert api._bot_error and "ConfigError" in api._bot_error
+        assert "BOT_TOKEN" in api.landing_html(None, api._bot_error)
+    finally:
+        _sys.modules.update(saved)
+        api._bot_module, api._bot_error = None, None

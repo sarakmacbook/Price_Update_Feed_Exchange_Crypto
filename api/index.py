@@ -57,8 +57,8 @@ def get_bot():
         try:
             import bot as _b
             _bot_module = _b
-        except Exception as e:                                    # pragma: no cover
-            _bot_error = f"{type(e).__name__}: {e}"
+        except (Exception, SystemExit) as e:   # SystemExit: bot.py calls sys.exit()
+            _bot_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             traceback.print_exc()
     return _bot_module
 
