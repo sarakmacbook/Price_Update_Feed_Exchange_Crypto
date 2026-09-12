@@ -1,0 +1,51 @@
+# Free scheduler for the Vercel deployment.
+#
+# Vercel's own Cron Jobs only run once per day on the Hobby plan, so this
+# workflow pings /api/cron for you instead (Pro users can use vercel.json
+# "crons" instead — see README).
+#
+# Setup (once):
+#   1. Repo ▸ Settings ▸ Secrets and variables ▸ Actions ▸ New repository secret
+#   2. Name: CRON_URL
+#      Value: https://<your-app>.vercel.app/api/cron?key=<CRON_SECRET>
+#   3. Enable Actions if they are disabled for the repository.
+#
+# The job loops for ~10 minutes pinging every INTERVAL seconds so the effective
+# price-update frequency is close to what you configured in the bot; GitHub then
+# starts the next run ~5 minutes later.
+
+name: price-update
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: price-update
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Ping the bot's cron endpoint
+        env:
+          CRON_URL: ${{ secrets.CRON_URL }}
+          INTERVAL: ${{ vars.INTERVAL || '60' }}
+        run: |
+          if [ -z "$CRON_URL" ]; then
+            echo "::error::Add the CRON_URL repository secret (https://<app>.vercel.app/api/cron?key=<CRON_SECRET>)"
+            exit 1
+          fi
+          end=$((SECONDS + 600))
+          while [ $SECONDS -lt $end ]; do
+            code=$(curl -s -o /tmp/out.json -w "%{http_code}" --max-time 55 "$CRON_URL" || echo 000)
+            echo "$(date -u +%H:%M:%S) → HTTP $code $(head -c 300 /tmp/out.json 2>/dev/null)"
+            if [ "$code" = "401" ]; then
+              echo "::error::Unauthorized — check the key in CRON_URL against CRON_SECRET"
+              exit 1
+            fi
+            sleep "${INTERVAL:-60}"
+          done

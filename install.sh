@@ -318,6 +318,8 @@ elif [[ ! -d "$INSTALL_DIR" ]]; then
         warn "Archive download failed too — fetching the core files one by one..."
         fetch "$RAW_URL/bot.py"           "$INSTALL_DIR/bot.py"           || true
         fetch "$RAW_URL/exchanges.py"     "$INSTALL_DIR/exchanges.py"     || true
+        fetch "$RAW_URL/adlinks.py"       "$INSTALL_DIR/adlinks.py"       || true
+        fetch "$RAW_URL/storage.py"       "$INSTALL_DIR/storage.py"       || true
         fetch "$RAW_URL/requirements.txt" "$INSTALL_DIR/requirements.txt" || true
       }
     }
@@ -339,7 +341,7 @@ if [[ ! -f "$INSTALL_DIR/bot.py" ]]; then
 fi
 
 cd "$INSTALL_DIR"
-echo "  Files: $(ls -1 bot.py exchanges.py requirements.txt 2>/dev/null | tr '\n' ' ')"
+echo "  Files: $(ls -1 bot.py exchanges.py adlinks.py storage.py requirements.txt 2>/dev/null | tr '\n' ' ')"
 
 # ── 4. venv & deps ──
 step "4/6  Setting up Python environment"
@@ -575,7 +577,7 @@ fi
 # see DEFAULT_SETTINGS in bot.py so the two never drift apart)
 if [[ ! -f "$INSTALL_DIR/data.json" ]]; then
   cat > "$INSTALL_DIR/data.json" <<'EOF'
-{"group": null, "auto": false, "merchants": {}, "last": {}, "settings": {"show_liquidity": false, "show_buttons": true, "custom_header": "", "custom_body": "", "custom_footer": "", "auto_delete": true, "delete_after_hours": 24, "delete_join_left": true}, "last_msg_id": null, "last_msg_time": null}
+{"group": null, "auto": false, "merchants": {}, "last": {}, "settings": {"show_liquidity": false, "show_buttons": true, "custom_header": "", "custom_body": "", "custom_footer": "", "auto_delete": true, "delete_after_hours": 24, "delete_join_left": true, "buttons_order": "buy_sell", "btn_buy_label": "", "btn_sell_label": "", "btn_buy_url": "", "btn_sell_url": "", "btn_link_mode": "ad", "ad_link_templates": {}, "price_links": true}, "last_msg_id": null, "last_msg_time": null}
 EOF
 fi
 chmod 600 "$CONFIG_FILE" 2>/dev/null || true

@@ -1,3 +1,7 @@
+"""Telegram bot: P2P merchant price feed (polling locally, webhook on Vercel)."""
+
+from __future__ import annotations
+
 import os, sys, json, asyncio, logging, argparse, signal, time, re
 from dataclasses import asdict
 from pathlib import Path
@@ -6,15 +10,51 @@ from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as 
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, ChatMemberHandler, ContextTypes, filters)
 from exchanges import Merchant, parse_url, fetch, HEADERS
+from adlinks import (EXCHANGE_NAMES, AD_LINK_TEMPLATES, ad_link, market_link,
+                     resolve_templates, render_template, template_is_exact, taker_side)
+from storage import build_store
 
 # ── paths: always relative to this file (works with systemd WorkingDirectory) ──
+# P2P_CONFIG_FILE / P2P_STATE_FILE override them (tests, or installs that keep
+# their data outside the code directory).
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG = BASE_DIR / "config.json"
+CONFIG = Path(os.getenv("P2P_CONFIG_FILE") or (BASE_DIR / "config.json"))
 DB = BASE_DIR / "data.json"
+
+# ── serverless (Vercel) mode ──
+# Vercel sets VERCEL=1 in every function.  There we run as a Telegram webhook,
+# keep the state in Redis/KV (see storage.py) and let /api/cron drive the
+# scheduled posts instead of the in-process JobQueue.
+SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("P2P_SERVERLESS"))
+STORE = build_store(BASE_DIR)
 
 ICON = {"binance": "🟡", "bybit": "🟣", "okx": "⚫", "bitget": "🔵"}
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger("p2p-bot")
+
+
+class ConfigError(RuntimeError):
+    """Raised instead of exiting when the bot runs inside a serverless function."""
+
+
+def _fatal(msg: str):
+    """Exit locally, raise in serverless (so the HTTP layer can report it)."""
+    if SERVERLESS:
+        raise ConfigError(msg)
+    log.error(msg)
+    sys.exit(1)
+
+
+def _write_config(cfg: dict) -> bool:
+    """Persist config.json when possible — never fatal (read-only hosts)."""
+    try:
+        json.dump(cfg, open(CONFIG, "w"), indent=1)
+        try: os.chmod(CONFIG, 0o600)
+        except Exception: pass
+        return True
+    except Exception as e:
+        log.info("config.json not writable (%s) — using environment configuration", e)
+        return False
 
 # ── CLI / ENV ──
 def parse_cli():
@@ -26,7 +66,9 @@ def parse_cli():
     p.add_argument("--asset", help="Asset, e.g. USDT")
     p.add_argument("--fiat", help="Fiat, e.g. USD")
     p.add_argument("--interval", type=int, help="Check interval seconds")
-    return p.parse_args()
+    # parse_known_args: never die on foreign argv (pytest, process managers, runtimes)
+    args, _unknown = p.parse_known_args()
+    return args
 
 CLI = parse_cli()
 if CLI.reconfigure:
@@ -66,9 +108,7 @@ def setup_interactive(existing=None):
         "interval": int(ask("Check prices every N seconds",
                             str(prefill("interval", ["INTERVAL"], CLI.interval, "60")), check=str.isdigit)),
     }
-    json.dump(cfg, open(CONFIG, "w"), indent=1)
-    try: os.chmod(CONFIG, 0o600)
-    except Exception: pass
+    _write_config(cfg)
     print(f"✅ Saved to {CONFIG}. Re-run with  python bot.py --setup  to change.\n")
     return cfg
 
@@ -105,11 +145,8 @@ def load_config():
             "interval": int(str(env_interval or "60").strip()),
         }
         if ":" not in cfg["token"]:
-            log.error("BOT_TOKEN invalid (missing ':')")
-            sys.exit(1)
-        json.dump(cfg, open(CONFIG, "w"), indent=1)
-        try: os.chmod(CONFIG, 0o600)
-        except: pass
+            _fatal("BOT_TOKEN invalid (missing ':')")
+        _write_config(cfg)
         return cfg
 
     if file_cfg:
@@ -126,19 +163,14 @@ def load_config():
             try: file_cfg["interval"] = int(str(env_interval).strip()); dirty=True
             except: pass
         if dirty:
-            json.dump(file_cfg, open(CONFIG, "w"), indent=1)
-            try: os.chmod(CONFIG, 0o600)
-            except: pass
+            _write_config(file_cfg)
         return file_cfg
 
-    if sys.stdin.isatty():
+    if sys.stdin.isatty() and not SERVERLESS:
         return setup_interactive(file_cfg)
-    else:
-        log.error("config.json not found and no BOT_TOKEN/ADMIN_IDS env provided.")
-        log.error("Run interactively:  python bot.py --setup")
-        log.error("Or set env:  BOT_TOKEN=123:ABC ADMIN_IDS=123456 python bot.py")
-        log.error("Or use installer:  bash install.sh --token 123:ABC --admins 123456")
-        sys.exit(1)
+    _fatal("No configuration found. Set the BOT_TOKEN and ADMIN_IDS environment "
+           "variables (and ASSET/FIAT/INTERVAL), or create config.json with "
+           "`python bot.py --setup`.")
 
 cfg = load_config()
 
@@ -146,12 +178,11 @@ TOKEN, ASSET, FIAT, INTERVAL = cfg["token"], cfg["asset"], cfg["fiat"], int(cfg[
 try:
     ADMINS = {int(x.strip()) for x in cfg["admins"].split(",") if x.strip()}
 except Exception:
-    log.error("admins field invalid: %r — should be comma-separated IDs", cfg.get("admins"))
-    sys.exit(1)
+    _fatal(f"admins field invalid: {cfg.get('admins')!r} — should be comma-separated IDs")
+    raise
 
 if ":" not in TOKEN:
-    log.error("token invalid — should contain ':'")
-    sys.exit(1)
+    _fatal("token invalid — should contain ':'")
 
 # ── state ──
 # default look of the inline Buy / Sell buttons under the group post
@@ -171,24 +202,38 @@ DEFAULT_SETTINGS = {
     "buttons_order": "buy_sell",   # "buy_sell" = Buy left / Sell right, "sell_buy" = the opposite
     "btn_buy_label": "",           # empty = DEFAULT_BUY_LABEL
     "btn_sell_label": "",          # empty = DEFAULT_SELL_LABEL
-    "btn_buy_url": "",             # empty = merchant profile URL
-    "btn_sell_url": "",            # empty = merchant profile URL
+    "btn_buy_url": "",             # empty = exact best ad (see below)
+    "btn_sell_url": "",            # empty = exact best ad (see below)
+    # ── where the buttons/prices point ──
+    "btn_link_mode": "ad",         # "ad" = the exact ad of the shown price, "profile" = merchant profile
+    "ad_link_templates": {},       # per-exchange deep-link overrides (see adlinks.py)
+    "price_links": True,           # also make the prices in the post clickable
 }
+
+def empty_state():
+    return {"group": None, "auto": False, "merchants": {}, "last": {},
+            "settings": DEFAULT_SETTINGS.copy(), "last_msg_id": None, "last_msg_time": None}
+
 
 def load():
     try:
-        data = json.loads(DB.read_text())
-    except FileNotFoundError:
-        data = {"group": None, "auto": False, "merchants": {}, "last": {}, "settings": DEFAULT_SETTINGS.copy(), "last_msg_id": None, "last_msg_time": None}
-    except Exception as e:
-        log.warning("data.json unreadable: %s — resetting", e)
-        data = {"group": None, "auto": False, "merchants": {}, "last": {}, "settings": DEFAULT_SETTINGS.copy(), "last_msg_id": None, "last_msg_time": None}
+        data = STORE.load()
+    except Exception as e:                                   # pragma: no cover - defensive
+        log.warning("state backend unavailable: %s — resetting", e)
+        data = None
+    if not isinstance(data, dict):
+        data = empty_state()
     # migration: ensure keys exist
     if "settings" not in data or not isinstance(data["settings"], dict):
         data["settings"] = DEFAULT_SETTINGS.copy()
     for k, v in DEFAULT_SETTINGS.items():
         if k not in data["settings"]:
             data["settings"][k] = v
+    # sanitise the settings that are read as structured values
+    if not isinstance(data["settings"].get("ad_link_templates"), dict):
+        data["settings"]["ad_link_templates"] = {}
+    if data["settings"].get("btn_link_mode") not in ("ad", "profile"):
+        data["settings"]["btn_link_mode"] = DEFAULT_SETTINGS["btn_link_mode"]
     if "last" not in data:
         data["last"] = {}
     if "merchants" not in data:
@@ -203,12 +248,25 @@ def load():
         data["last_msg_time"] = None
     return data
 
-def save(): 
-    DB.write_text(json.dumps(state, indent=1))
-    try: os.chmod(DB, 0o600)
-    except: pass
+def save():
+    state["updated_at"] = int(time.time())
+    STORE.save(state)
+
 
 state = load()
+
+
+def reload_state():
+    """Re-read shared state (serverless: another instance may have written it)."""
+    global state
+    if not SERVERLESS:
+        return state
+    fresh = load()
+    if isinstance(fresh, dict):
+        state = fresh
+    return state
+
+
 merchants = lambda: [Merchant(**m) for m in state["merchants"].values()]
 is_admin = lambda u: u.effective_user and u.effective_user.id in ADMINS
 fmt = lambda p: f"{p:.4f}".rstrip("0").rstrip(".") if p is not None else "—"
@@ -229,6 +287,71 @@ def fmt_amount(a):
 
 def get_settings():
     return state.get("settings", DEFAULT_SETTINGS)
+
+# ── exact-ad links ──────────────────────────────────────────────────────────
+def ad_templates() -> dict:
+    """Default deep-link templates merged with per-exchange overrides
+    (settings ▸ 🔗 Ad links, or the AD_LINK_TEMPLATES env var as JSON)."""
+    raw = get_settings().get("ad_link_templates")
+    overrides = dict(raw) if isinstance(raw, dict) else {}
+    env_json = os.getenv("AD_LINK_TEMPLATES")
+    if env_json:
+        try:
+            extra = json.loads(env_json)
+            if isinstance(extra, dict):
+                overrides.update(extra)
+        except Exception as e:
+            log.warning("AD_LINK_TEMPLATES is not valid JSON: %s", e)
+    return resolve_templates(overrides)
+
+def link_mode() -> str:
+    """'ad' → the exact ad of the shown price, 'profile' → merchant profile page."""
+    return "profile" if get_settings().get("btn_link_mode") == "profile" else "ad"
+
+def side_links(side: str, m: Merchant, r: dict | None = None) -> dict:
+    """Every URL we know for one side of one merchant.
+
+    ``ad``      exact advertisement the price came from (empty when unknown)
+    ``profile`` merchant profile page that was pasted into the bot
+    ``market``  exchange market page for this pair/side
+    ``best``    what the buttons should use (ad → profile → market)
+    """
+    r = r or {}
+    asset, fiat = (m.asset or ASSET), (m.fiat or FIAT)
+    ad_id = r.get(f"{side}_ad_id")
+    exact = ad_link(m.exchange, ad_id, asset, fiat, side,
+                    templates=ad_templates(), nick=m.nickname or m.merchant_id,
+                    profile_url=m.url or "") if ad_id else None
+    profile = m.url or ""
+    mkt = market_link(m.exchange, asset, fiat, side) or ""
+    if link_mode() == "ad":
+        best = exact or profile or mkt
+    else:
+        best = profile or exact or mkt
+    return {"ad": exact or "", "profile": profile, "market": mkt, "best": best,
+            "ad_id": str(ad_id or "")}
+
+def link_values(side: str, m: Merchant, r: dict | None = None) -> dict:
+    """Placeholders available in button-URL / body templates."""
+    r = r or {}
+    links = side_links(side, m, r)
+    price = r.get(side)
+    values = {
+        "URL": links["profile"], "PROFILE_URL": links["profile"],
+        "AD_URL": links["ad"], "LINK_URL": links["best"],
+        "AD_ID": links["ad_id"], "PRICE": fmt(price),
+        "AMOUNT": fmt_amount(r.get(f"{side}_amount")) or "",
+        "NICK": m.nickname or m.merchant_id or "",
+        "EXCHANGE": m.exchange, "EXCHANGE_TITLE": m.exchange.title(),
+        "ICON": ICON.get(m.exchange, "💱"),
+        "ASSET": (m.asset or ASSET).upper(), "ASSET_LOWER": (m.asset or ASSET).lower(),
+        "FIAT": (m.fiat or FIAT).upper(), "FIAT_LOWER": (m.fiat or FIAT).lower(),
+        "PAIR": f"{(m.asset or ASSET)}/{(m.fiat or FIAT)}",
+        "SIDE": side.upper(), "side": side,
+        "TAKER_SIDE": taker_side(side).upper(),
+    }
+    values["LINK"] = f'<a href="{links["best"]}">{fmt(price)}</a>' if links["best"] else fmt(price)
+    return values
 
 # ── panel ──
 BOT_USERNAME = None  # filled in post_init
@@ -260,6 +383,9 @@ def settings_kb():
         [B(f"💧 Liquidity: {'ON ✅' if s.get('show_liquidity') else 'OFF ❌'}", callback_data="toggle_liquidity"),
          B(f"🔘 Buy/Sell Buttons: {'ON ✅' if s.get('show_buttons') else 'OFF ❌'}", callback_data="toggle_buttons")],
         [B("🟢🔴 Edit Buy/Sell buttons", callback_data="buttons_menu")],
+        [B(f"🎯 Exact ad links: {'ON ✅' if link_mode() == 'ad' else 'OFF ❌'}", callback_data="toggle_link_mode"),
+         B(f"🔗 Link prices: {'ON ✅' if s.get('price_links', True) else 'OFF ❌'}", callback_data="toggle_price_links")],
+        [B("🔗 Ad link templates", callback_data="adlink_menu")],
         [B(f"🗑 Auto-delete prev: {'ON ✅' if s.get('auto_delete') else 'OFF ❌'}", callback_data="toggle_autodelete"),
          B(f"⏰ Delete after {s.get('delete_after_hours',24)}h", callback_data="toggle_delete_hours")],
         [B(f"🚪 Del Join/Left msgs: {'ON ✅' if s.get('delete_join_left', True) else 'OFF ❌'}", callback_data="toggle_joinleft")],
@@ -273,13 +399,66 @@ def buttons_menu_kb():
     return KB([
         [B(f"🔘 Buttons: {'ON ✅' if s.get('show_buttons') else 'OFF ❌'}", callback_data="toggle_buttons"),
          B(f"🔄 Order: {order_label()}", callback_data="toggle_btn_order")],
+        [B(f"🎯 Target: {'EXACT AD 🎯' if link_mode() == 'ad' else 'PROFILE 👤'}", callback_data="toggle_link_mode")],
         [B("🟢 Edit BUY label", callback_data="edit_buy_label"),
          B("🔴 Edit SELL label", callback_data="edit_sell_label")],
         [B("🔗 BUY link", callback_data="edit_buy_url"),
          B("🔗 SELL link", callback_data="edit_sell_url")],
+        [B("🔗 Ad link templates", callback_data="adlink_menu")],
         [B("♻️ Reset buttons to default", callback_data="reset_buttons")],
         [B("👁 Preview", callback_data="preview"), B("⬅️ Back", callback_data="settings")]
     ])
+
+def adlink_menu_text():
+    """Deep links: explain that buttons open the exact ad of the shown price."""
+    s = get_settings()
+    templates = ad_templates()
+    mode = link_mode()
+    lines = [
+        "🔗 <b>Ad links — where the buttons take people</b>",
+        "",
+        f"🎯 Exact ad links: <b>{'ON ✅' if mode == 'ad' else 'OFF ❌'}</b>",
+        ("   Buy/Sell buttons and the prices in the post open the <b>exact ad</b> "
+         "the price was taken from." if mode == "ad" else
+         "   Buttons open the merchant's profile page instead."),
+        f"🔗 Link prices in text: <b>{'ON ✅' if s.get('price_links', True) else 'OFF ❌'}</b>",
+        "",
+        "<b>Templates per exchange</b> (placeholders: <code>{AD_ID}</code> "
+        "<code>{ASSET}</code> <code>{FIAT}</code> <code>{SIDE}</code> "
+        "<code>{TAKER_SIDE}</code> <code>{URL}</code> <code>{NICK}</code>):",
+    ]
+    for ex in EXCHANGE_NAMES:
+        tpl = templates.get(ex, "")
+        tag = "🎯 exact ad" if template_is_exact(tpl) else "↪️ market page + ad hint"
+        lines.append(f"{ICON.get(ex, '💱')} <b>{ex.title()}</b> — {tag}\n<code>{html_escape(tpl)}</code>")
+    lines += [
+        "",
+        "Tap an exchange to change its template, or ♻️ to go back to the defaults.",
+        "A template can also be set from the environment: "
+        "<code>AD_LINK_TEMPLATES={\"okx\": \"https://…{AD_ID}\"}</code>.",
+        "",
+        "ℹ️ Binance publishes a real single-ad link, so those buttons open exactly "
+        "one ad. OKX / Bybit / Bitget load the right market, side and pair and pass "
+        "the ad id as a hint (Bybit's own share links expire after 30 minutes, so a "
+        "permanent ad link is not possible there).",
+    ]
+    return "\n".join(lines)
+
+def adlink_menu_kb():
+    templates = ad_templates()
+    rows = []
+    for ex in EXCHANGE_NAMES:
+        tag = "🎯" if template_is_exact(templates.get(ex, "")) else "↪️"
+        rows.append([B(f"{tag} {ICON.get(ex, '💱')} {ex.title()}", callback_data=f"edit_adlink:{ex}")])
+    rows.append([B(f"🎯 Exact ad links: {'ON ✅' if link_mode() == 'ad' else 'OFF ❌'}", callback_data="toggle_link_mode")])
+    rows.append([B("♻️ Reset templates", callback_data="reset_adlinks")])
+    rows.append([B("👁 Preview", callback_data="preview"), B("⬅️ Back", callback_data="settings")])
+    return KB(rows)
+
+def reset_adlinks():
+    state["settings"]["ad_link_templates"] = {}
+    state["settings"]["btn_link_mode"] = DEFAULT_SETTINGS["btn_link_mode"]
+    save()
 
 def custom_menu_kb():
     return KB([
@@ -312,7 +491,7 @@ def panel_text():
         f"Group: <code>{g}</code>\n"
         f"Merchants: {len(state['merchants'])} · Pair: {ASSET}/{FIAT} · every {INTERVAL}s\n"
         f"💧 Liquidity: <b>{liq}</b> · 🔘 Buttons: <b>{btns}</b> · 🗑 AutoDel: <b>{autodel}</b>\n"
-        f"🔄 Btn order: <b>{order_label()}</b>\n"
+        f"🔄 Btn order: <b>{order_label()}</b> · 🎯 Links: <b>{'EXACT AD' if link_mode() == 'ad' else 'PROFILE'}</b>\n"
         f"🚪 Del Join/Left msgs: <b>{joinleft}</b>\n"
         f"📝 Header: <code>{header_short}</code>\n"
         f"📝 Body: <code>{body_short}</code>\n"
@@ -340,6 +519,10 @@ def settings_text():
         f"   When ON, group message includes Buy/Sell URL buttons.\n"
         f"   Order: <b>{order_label()}</b> — tap 🟢🔴 Edit Buy/Sell buttons to change\n"
         f"   the order, the labels and the links.\n\n"
+        f"🎯 Buy/Sell buttons & prices open: <b>{'the EXACT ad 🎯' if link_mode() == 'ad' else 'the merchant profile 👤'}</b>\n"
+        f"   Toggle it here or with the 🟢🔴 Edit Buy/Sell buttons menu; the deep-link\n"
+        f"   templates live in 🔗 Ad link templates.\n\n"
+        f"🔗 Clickable prices in the post: <b>{'ON ✅' if s.get('price_links', True) else 'OFF ❌'}</b>\n\n"
         f"🗑 Auto-delete previous message: <b>{autodel}</b>\n"
         f"   When ON, deletes previous price message on refresh/update.\n\n"
         f"⏰ Auto-delete after: <b>{del_hours}h</b>\n"
@@ -354,6 +537,8 @@ def settings_text():
         f"Header/Footer placeholders: <code>{{ASSET}}</code>, <code>{{FIAT}}</code>, <code>{{PAIR}}</code>\n"
         f"Body placeholders: <code>{{ICON}}</code> <code>{{EXCHANGE}}</code> <code>{{NICK}}</code> <code>{{SELL}}</code> <code>{{BUY}}</code> "
         f"<code>{{SELL_AMOUNT}}</code> <code>{{BUY_AMOUNT}}</code> <code>{{LINK}}</code> <code>{{URL}}</code> <code>{{ERROR}}</code> and header ones.\n"
+        f"Ad-link placeholders: <code>{{SELL_URL}}</code> <code>{{BUY_URL}}</code> <code>{{SELL_AD_ID}}</code> <code>{{BUY_AD_ID}}</code> "
+        f"<code>{{SELL_LINK}}</code> <code>{{BUY_LINK}}</code>.\n"
         f"HTML allowed: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;, &lt;a&gt; etc."
     )
 
@@ -382,6 +567,12 @@ def buttons_menu_text():
         f"🔴 <b>SELL label:</b>\n<code>{html_escape(sell_tpl)}</code>\n\n"
         f"🔗 BUY link: <code>{html_escape(buy_url)}</code>\n"
         f"🔗 SELL link: <code>{html_escape(sell_url)}</code>\n\n"
+        f"🎯 Target: <b>{'the exact ad of the shown price' if link_mode() == 'ad' else 'the merchant profile page'}</b>\n"
+        + ("   Each button opens the ad the price was read from "
+           "(🟡 Binance = one specific ad, others = market page + ad hint).\n"
+           if link_mode() == "ad" else
+           "   Tap 🎯 Target to send buyers straight to the exact ad instead.\n")
+        + "\n"
         f"<b>Row preview (per merchant):</b>\n{preview_row}\n\n"
         f"<b>Label placeholders:</b>\n"
         f"<code>{{PRICE}}</code> <code>{{NICK}}</code> <code>{{FULLNICK}}</code> <code>{{EXCHANGE}}</code> "
@@ -502,6 +693,9 @@ def apply_body_template(tpl: str, m: Merchant, r: dict) -> str:
     buy_amt = fmt_amount(r.get("buy_amount")) or "—"
     sell, buy = fmt(r.get("sell")), fmt(r.get("buy"))
     err = r.get("error") or ""
+    sell_links, buy_links = side_links("sell", m, r), side_links("buy", m, r)
+    sell_link = f'<a href="{sell_links["best"]}">{sell}</a>' if sell_links["best"] else sell
+    buy_link = f'<a href="{buy_links["best"]}">{buy}</a>' if buy_links["best"] else buy
     mapping = {
         "ASSET": ASSET, "asset": ASSET.lower(), "Asset": ASSET.title(),
         "FIAT": FIAT, "fiat": FIAT.lower(), "Fiat": FIAT.title(),
@@ -514,6 +708,11 @@ def apply_body_template(tpl: str, m: Merchant, r: dict) -> str:
         "SELL": sell, "Sell": sell, "BUY": buy, "Buy": buy,
         "SELL_AMOUNT": sell_amt, "BUY_AMOUNT": buy_amt,
         "SELL_LIQ": sell_amt, "BUY_LIQ": buy_amt,
+        # exact-ad links of the prices above (see adlinks.py)
+        "SELL_URL": sell_links["best"], "BUY_URL": buy_links["best"],
+        "SELL_AD_URL": sell_links["ad"], "BUY_AD_URL": buy_links["ad"],
+        "SELL_AD_ID": sell_links["ad_id"], "BUY_AD_ID": buy_links["ad_id"],
+        "SELL_LINK": sell_link, "BUY_LINK": buy_link,
         "ERROR": err, "error": err,
     }
     keys = sorted(mapping, key=len, reverse=True)
@@ -536,6 +735,50 @@ async def on_text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         c.user_data.pop("awaiting_custom", None)
         await u.message.reply_html(f"✅ Custom {awaiting} saved:\n<code>{txt[:500]}</code>", reply_markup=panel())
         await u.message.reply_html(panel_text(), reply_markup=panel())
+        return
+
+    if awaiting and awaiting.startswith("adlink:"):
+        ex = awaiting.split(":", 1)[1]
+        if txt.lower() == "/cancel":
+            c.user_data.pop("awaiting_custom", None)
+            await u.message.reply_text("❌ Cancelled.", reply_markup=panel())
+            return
+        if ex not in EXCHANGE_NAMES:
+            c.user_data.pop("awaiting_custom", None)
+            return await u.message.reply_text("❌ Unknown exchange.", reply_markup=panel())
+        value = "" if txt.lower() in ("default", "reset", "-", "none") else txt
+        if value and not value.startswith(("http://", "https://")):
+            await u.message.reply_text("❌ The template must start with https:// — try again, or /cancel.")
+            return
+        if value and "{AD_ID}" not in value and c.user_data.get("adlink_warned") != ex:
+            # no ad id → the link will land on the market page, not one exact ad
+            c.user_data["adlink_warned"] = ex
+            await u.message.reply_html(
+                "⚠️ That template has no <code>{AD_ID}</code> placeholder, so buttons would "
+                "open the market page instead of one exact ad.\n\n"
+                "Send the same text again to save it anyway, or /cancel.")
+            return
+        overrides = dict(state["settings"].get("ad_link_templates") or {})
+        if value:
+            overrides[ex] = value
+        else:
+            overrides.pop(ex, None)
+        state["settings"]["ad_link_templates"] = overrides
+        save()
+        c.user_data.pop("awaiting_custom", None)
+        c.user_data.pop("adlink_warned", None)
+        shown = value or AD_LINK_TEMPLATES.get(ex, "")
+        sample = render_template(shown, {
+            "AD_ID": "1234567890", "ASSET": ASSET, "ASSET_LOWER": ASSET.lower(),
+            "FIAT": FIAT, "FIAT_LOWER": FIAT.lower(), "SIDE": "sell", "SIDE_UPPER": "SELL",
+            "TAKER_SIDE": "buy", "ACTION_TYPE": "1",
+            "URL": "https://merchant-profile", "NICK": "Merchant",
+        })
+        await u.message.reply_html(
+            f"✅ {ICON.get(ex, '💱')} {ex.title()} ad link template saved:\n"
+            f"<code>{html_escape(shown)}</code>\n\n"
+            f"Example link for a SELL ad:\n<code>{html_escape(sample)}</code>")
+        await u.message.reply_html(adlink_menu_text(), reply_markup=adlink_menu_kb())
         return
 
     if awaiting in ("buy_label", "sell_label", "buy_url", "sell_url"):
@@ -620,6 +863,15 @@ def report(prices):
         sell_amt = fmt_amount(r.get("sell_amount")) if s.get("show_liquidity") else None
         buy_amt = fmt_amount(r.get("buy_amount")) if s.get("show_liquidity") else None
 
+        # make the prices themselves open the exact ad the price came from
+        if s.get("price_links", True):
+            sell_url = side_links("sell", m, r)["best"]
+            buy_url = side_links("buy", m, r)["best"]
+            if sell_url:
+                sell_price = f'<a href="{sell_url}">{sell_price}</a>'
+            if buy_url:
+                buy_price = f'<a href="{buy_url}">{buy_price}</a>'
+
         sell_line = f"   🔴 Best SELL (you buy): <b>{sell_price}</b>"
         if sell_amt:
             sell_line += f"  💧 {sell_amt} {m.asset}"
@@ -680,16 +932,17 @@ def render_btn_label(tpl: str, m: Merchant, price, amount, side: str) -> str:
             label = label[:59].rstrip() + "…"
     return label or side.upper()
 
-def btn_url(side: str, m: Merchant) -> str:
-    """Custom Buy/Sell URL override, falling back to the merchant profile URL."""
+def btn_url(side: str, m: Merchant, r: dict | None = None) -> str:
+    """Link behind a Buy/Sell button.
+
+    Priority: custom override (settings ▸ 🔗 BUY/SELL link) → the exact ad the
+    shown price was taken from → the merchant profile → the exchange market page.
+    """
     custom = (get_settings().get(f"btn_{side}_url") or "").strip()
     if custom:
-        return (custom
-                .replace("{URL}", m.url or "")
-                .replace("{NICK}", m.nickname or m.merchant_id or "")
-                .replace("{EXCHANGE}", m.exchange)
-                .replace("{ASSET}", ASSET).replace("{FIAT}", FIAT))
-    return m.url
+        # {URL} {AD_URL} {AD_ID} {PRICE} {NICK} {EXCHANGE} {ASSET} {FIAT} {SIDE} …
+        return render_template(custom, link_values(side, m, r))
+    return side_links(side, m, r)["best"]
 
 def report_keyboard(prices):
     s = get_settings()
@@ -698,18 +951,23 @@ def report_keyboard(prices):
     rows = []
     for m in merchants():
         r = prices.get(m.key)
-        if not r or not m.url:
+        if not r:
             continue
         sell, buy = r.get("sell"), r.get("buy")
         buy_btn = sell_btn = None
         # NOTE: a merchant's BUY ad is where the user sells, and vice-versa —
         # the labels keep the exchange wording, only their order is configurable.
+        # Each button links to the exact ad its price came from (btn_link_mode).
         if buy is not None:
-            buy_btn = B(render_btn_label(buy_label_tpl(), m, buy, r.get("buy_amount"), "buy"),
-                        url=btn_url("buy", m))
+            buy_url = btn_url("buy", m, r)
+            if buy_url:
+                buy_btn = B(render_btn_label(buy_label_tpl(), m, buy, r.get("buy_amount"), "buy"),
+                            url=buy_url)
         if sell is not None:
-            sell_btn = B(render_btn_label(sell_label_tpl(), m, sell, r.get("sell_amount"), "sell"),
-                         url=btn_url("sell", m))
+            sell_url = btn_url("sell", m, r)
+            if sell_url:
+                sell_btn = B(render_btn_label(sell_label_tpl(), m, sell, r.get("sell_amount"), "sell"),
+                             url=sell_url)
         pair = [buy_btn, sell_btn] if buttons_order() == "buy_sell" else [sell_btn, buy_btn]
         row = [b for b in pair if b]
         if row:
@@ -746,10 +1004,14 @@ async def post(bot, force=False):
     if not state["group"] or not state["merchants"]: return False
     prices = await get_prices()
     s = get_settings()
+    # the ad id is part of the snapshot: when the cheapest/most expensive ad of a
+    # merchant changes, the post (and its exact-ad buttons) must be refreshed too
     if s.get("show_liquidity"):
-        snap = {k: [v.get("sell"), v.get("buy"), v.get("sell_amount"), v.get("buy_amount")] for k, v in prices.items()}
+        snap = {k: [v.get("sell"), v.get("buy"), v.get("sell_amount"), v.get("buy_amount"),
+                    v.get("sell_ad_id"), v.get("buy_ad_id")] for k, v in prices.items()}
     else:
-        snap = {k: [v.get("sell"), v.get("buy")] for k, v in prices.items()}
+        snap = {k: [v.get("sell"), v.get("buy"), v.get("sell_ad_id"), v.get("buy_ad_id")]
+                for k, v in prices.items()}
     snap["_header"] = s.get("custom_header","")
     snap["_body"] = s.get("custom_body","")
     snap["_footer"] = s.get("custom_footer","")
@@ -760,6 +1022,9 @@ async def post(bot, force=False):
     snap["_btn_sell"] = s.get("btn_sell_label", "")
     snap["_btn_buy_url"] = s.get("btn_buy_url", "")
     snap["_btn_sell_url"] = s.get("btn_sell_url", "")
+    snap["_link_mode"] = link_mode()
+    snap["_ad_templates"] = ad_templates()
+    snap["_price_links"] = bool(s.get("price_links", True))
     if not force and snap == state["last"]: return False
     state["last"] = snap; save()
 
@@ -781,35 +1046,76 @@ async def post(bot, force=False):
         return False
     return True
 
-async def job(c: ContextTypes.DEFAULT_TYPE):
-    if state["auto"]:
-        try: await post(c.bot)
-        except Exception as e: logging.warning("auto post failed: %s", e)
+async def auto_post_task(bot) -> bool:
+    """Post prices when auto mode is on (and the snapshot changed)."""
+    if not state.get("auto"):
+        return False
+    return bool(await post(bot))
 
-async def cleanup_job(c: ContextTypes.DEFAULT_TYPE):
-    """Delete group message after delete_after_hours (default 24h)"""
+async def cleanup_task(bot) -> bool:
+    """Delete the group message once it is older than delete_after_hours."""
     s = get_settings()
     hours = s.get("delete_after_hours", 24)
     if hours <= 0:
-        return  # disabled
+        return False  # disabled
     last_time = state.get("last_msg_time")
     if not last_time or not state.get("last_msg_id") or not state.get("group"):
-        return
+        return False
     now = int(time.time())
-    if now - last_time >= hours * 3600:
-        log.info(f"Message {state['last_msg_id']} is older than {hours}h, auto-deleting")
-        try:
-            await c.bot.delete_message(chat_id=state["group"], message_id=state["last_msg_id"])
+    if now - last_time < hours * 3600:
+        return False
+    log.info(f"Message {state['last_msg_id']} is older than {hours}h, auto-deleting")
+    try:
+        await bot.delete_message(chat_id=state["group"], message_id=state["last_msg_id"])
+        state["last_msg_id"] = None
+        state["last_msg_time"] = None
+        save()
+        return True
+    except Exception as e:
+        log.debug(f"Cleanup delete failed: {e}")
+        # clear if not found
+        if "not found" in str(e).lower():
             state["last_msg_id"] = None
             state["last_msg_time"] = None
             save()
-        except Exception as e:
-            log.debug(f"Cleanup delete failed: {e}")
-            # clear if not found
-            if "not found" in str(e).lower():
-                state["last_msg_id"] = None
-                state["last_msg_time"] = None
-                save()
+        return False
+
+# ── scheduled work (JobQueue locally, /api/cron on Vercel) ──
+async def job(c: ContextTypes.DEFAULT_TYPE):
+    """PTB JobQueue callback — used by the polling (VPS/Docker) deployment."""
+    try:
+        await auto_post_task(c.bot)
+    except Exception as e:
+        log.warning("auto post failed: %s", e)
+
+async def cleanup_job(c: ContextTypes.DEFAULT_TYPE):
+    """PTB JobQueue callback — used by the polling (VPS/Docker) deployment."""
+    try:
+        await cleanup_task(c.bot)
+    except Exception as e:
+        log.warning("cleanup failed: %s", e)
+
+async def run_scheduled(bot, force: bool = False) -> dict:
+    """One scheduler tick: auto-post + housekeeping.
+
+    Called by ``/api/cron`` (Vercel cron / external pinger).  Returns a small
+    summary so the endpoint can report what happened.
+    """
+    reload_state()
+    result = {"posted": False, "deleted": False, "auto": bool(state.get("auto")),
+              "group": state.get("group"), "merchants": len(state.get("merchants") or {}),
+              "errors": []}
+    try:
+        result["posted"] = bool(await post(bot, force=force)) if force else bool(await auto_post_task(bot))
+    except Exception as e:
+        log.warning("scheduled post failed: %s", e)
+        result["errors"].append(f"post: {e}")
+    try:
+        result["deleted"] = bool(await cleanup_task(bot))
+    except Exception as e:
+        log.warning("scheduled cleanup failed: %s", e)
+        result["errors"].append(f"cleanup: {e}")
+    return result
 
 # ── buttons ──
 def list_kb():
@@ -856,6 +1162,61 @@ async def on_button(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif d == "buttons_menu":
         await q.answer()
         return await q.edit_message_text(buttons_menu_text(), parse_mode="HTML", reply_markup=buttons_menu_kb())
+
+    elif d == "adlink_menu":
+        await q.answer()
+        return await q.edit_message_text(adlink_menu_text(), parse_mode="HTML", reply_markup=adlink_menu_kb())
+
+    elif d == "toggle_link_mode":
+        state["settings"]["btn_link_mode"] = "profile" if link_mode() == "ad" else "ad"
+        save()
+        await q.answer("Buttons open the EXACT ad 🎯" if link_mode() == "ad"
+                       else "Buttons open the merchant profile 👤")
+        if "Ad links" in (q.message.text or ""):
+            return await q.edit_message_text(adlink_menu_text(), parse_mode="HTML", reply_markup=adlink_menu_kb())
+        if "Buy / Sell buttons" in (q.message.text or ""):
+            return await q.edit_message_text(buttons_menu_text(), parse_mode="HTML", reply_markup=buttons_menu_kb())
+        try:
+            return await q.edit_message_text(settings_text(), parse_mode="HTML", reply_markup=settings_kb())
+        except Exception:
+            pass
+
+    elif d == "toggle_price_links":
+        state["settings"]["price_links"] = not state["settings"].get("price_links", True)
+        save()
+        await q.answer(f"Clickable prices {'ON' if state['settings']['price_links'] else 'OFF'}")
+        try:
+            if "Ad links" in (q.message.text or ""):
+                return await q.edit_message_text(adlink_menu_text(), parse_mode="HTML", reply_markup=adlink_menu_kb())
+            return await q.edit_message_text(settings_text(), parse_mode="HTML", reply_markup=settings_kb())
+        except Exception:
+            pass
+
+    elif d == "reset_adlinks":
+        reset_adlinks()
+        await q.answer("♻️ Ad link templates reset")
+        return await q.edit_message_text(adlink_menu_text(), parse_mode="HTML", reply_markup=adlink_menu_kb())
+
+    elif d.startswith("edit_adlink:"):
+        ex = d.split(":", 1)[1]
+        if ex not in EXCHANGE_NAMES:
+            return await q.answer()
+        c.user_data["awaiting_custom"] = f"adlink:{ex}"
+        tpl = ad_templates().get(ex, "")
+        await q.answer()
+        return await q.edit_message_text(
+            f"{ICON.get(ex, '💱')} <b>{ex.title()} ad link template</b>\n\n"
+            "Placeholders:\n"
+            "• <code>{AD_ID}</code> — the ad id from the exchange API\n"
+            "• <code>{TAKER_SIDE}</code> / <code>{SIDE}</code> — buy / sell\n"
+            "• <code>{ASSET}</code> <code>{ASSET_LOWER}</code> <code>{FIAT}</code> <code>{FIAT_LOWER}</code>\n"
+            "• <code>{URL}</code> <code>{NICK}</code> <code>{EXCHANGE}</code> <code>{ACTION_TYPE}</code>\n\n"
+            f"Current:\n<code>{html_escape(tpl)}</code>\n\n"
+            "Send the new template (must start with <code>https://</code>), "
+            "send <code>default</code> to restore the built-in one, or /cancel to abort.",
+            parse_mode="HTML",
+            reply_markup=KB([[B("❌ Cancel", callback_data="cancel_edit")]])
+        )
 
     elif d == "toggle_btn_order":
         state["settings"]["buttons_order"] = "sell_buy" if buttons_order() == "buy_sell" else "buy_sell"
@@ -1096,18 +1457,13 @@ async def error_handler(update, context):
     log.warning("Update %s caused error %s", update, context.error)
 
 # ── run ──
-def main():
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try: signal.signal(sig, lambda *_: sys.exit(0))
-        except: pass
+async def post_init(application):
+    global BOT_USERNAME
+    me = await application.bot.get_me()
+    BOT_USERNAME = me.username
+    log.info("Logged in as @%s", BOT_USERNAME)
 
-    async def post_init(application):
-        global BOT_USERNAME
-        me = await application.bot.get_me()
-        BOT_USERNAME = me.username
-        log.info("Logged in as @%s", BOT_USERNAME)
-
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setgroup", setgroup))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
@@ -1118,11 +1474,37 @@ def main():
                                    | filters.StatusUpdate.LEFT_CHAT_MEMBER, on_join_left))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(error_handler)
+    return app
+
+def build_application(webhook: bool = False) -> Application:
+    """Build the PTB application.
+
+    ``webhook=False`` → long polling with the in-process JobQueue
+    (VPS / Docker / local installs).
+
+    ``webhook=True``  → no Updater (Telegram calls the Vercel function) and no
+    repeating jobs are registered here: ``/api/cron`` drives the scheduled
+    posts and housekeeping instead.
+    """
+    builder = Application.builder().token(TOKEN).post_init(post_init)
+    if webhook:
+        builder = builder.updater(None)          # webhook mode: we push updates ourselves
+    return register_handlers(builder.build())
+
+def main():
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try: signal.signal(sig, lambda *_: sys.exit(0))
+        except: pass
+
+    app = build_application(webhook=False)
     app.job_queue.run_repeating(job, interval=INTERVAL, first=5)
     # cleanup job: check every 10 minutes if message older than 24h
     app.job_queue.run_repeating(cleanup_job, interval=600, first=60)
     print(f"🚀 Bot running · {ASSET}/{FIAT} · every {INTERVAL}s · Ctrl+C to stop")
     print(f"   Admins: {', '.join(map(str, ADMINS))} · Group: {state['group'] or 'not set'} · Merchants: {len(state['merchants'])}")
+    print(f"   State: {STORE.describe()}")
+    print(f"   Buttons: {'exact ad 🎯' if link_mode() == 'ad' else 'merchant profile 👤'}"
+          f" · clickable prices: {'ON' if get_settings().get('price_links', True) else 'OFF'}")
     if not state["group"]:
         print("   → Open the bot in Telegram, /start, tap 👥 Set group")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
