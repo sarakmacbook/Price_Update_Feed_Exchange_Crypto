@@ -1,16 +1,20 @@
 ## ⚡ One-Click Install
 
 ```bash
-wget https://raw.githubusercontent.com/sarakmacbook/exchange/refs/heads/main/install.sh
+wget https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/blob/main/install.sh
+
 
 chmod +x install.sh
 
 ./install.sh
 ```
+https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/blob/main/install.sh
+
 
 ## ⚡ One-Click Uninstall
 ```bash
-wget https://raw.githubusercontent.com/sarakmacbook/Price_Update_Feed_Exchange_Crypto/refs/heads/main/uninstall.sh
+wget https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/blob/main/uninstall.sh
+
 
 chmod +x uninstall.sh
 
