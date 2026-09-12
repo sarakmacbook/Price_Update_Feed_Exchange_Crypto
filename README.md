@@ -10,6 +10,13 @@ wget -q https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bo
 bash install.sh
 ```
 
+
+```bash
+wget https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/refs/heads/main/uninstall.sh
+
+bash uninstall.sh
+```
+
 Or run it without saving anything to disk:
 
 ```bash
