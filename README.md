@@ -1,24 +1,36 @@
-## ⚡ One-Click Install
+## ⚡ Quick Install (copy/paste)
 
 ```bash
-wget https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/blob/main/install.sh
+# with curl (recommended: -f aborts instead of saving an error page)
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh -o install.sh
+bash install.sh
 
-
-chmod +x install.sh
-
-./install.sh
+# with wget
+wget -q https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh -O install.sh
+bash install.sh
 ```
-https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/blob/main/install.sh
 
+Or run it without saving anything to disk:
 
-## ⚡ One-Click Uninstall
 ```bash
-wget https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/blob/main/uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash
+# …or: wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash
+```
 
+> ⚠️ **Download scripts from `raw.githubusercontent.com`, never from `github.com/…/blob/…`.**
+> A `blob` URL is GitHub's HTML *viewer page*, so `wget …/blob/main/install.sh` stores ~700 KB of
+> HTML in a file called `install.sh` — and running that fails with
+> ``line 7: syntax error near unexpected token `newline'`` / `` `<!DOCTYPE html>'``.
+> The same page comes back for a **renamed repository**, because `raw.githubusercontent.com`
+> does not follow renames. See [Troubleshooting](#-troubleshooting).
 
-chmod +x uninstall.sh
+## ⚡ Quick Uninstall (copy/paste)
 
-./uninstall.sh
+```bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/uninstall.sh | bash
+# …or: wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/uninstall.sh | bash
+# …or, from a checkout:
+bash uninstall.sh
 ```
 
 
@@ -48,20 +60,20 @@ Paste this on a fresh Ubuntu VPS (20.04 / 22.04 / 24.04):
 
 ```bash
 # with curl
-curl -fsSL https://raw.githubusercontent.com/sarakmacbook/exchange/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash
 
 # with wget
-wget -qO- https://raw.githubusercontent.com/sarakmacbook/exchange/main/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash
 ```
 
 ### Option B — Docker (macOS, Windows, any Linux)
 
 ```bash
 # with curl
-curl -fsSL https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-docker.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-docker.sh | bash
 
 # with wget
-wget -qO- https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-docker.sh | bash
+wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-docker.sh | bash
 ```
 
 The script checks/installs Docker, creates `config.json` + `.env`, and runs `docker compose up -d --build`.
@@ -70,10 +82,10 @@ The script checks/installs Docker, creates `config.json` + `.env`, and runs `doc
 
 ```bash
 # with curl
-curl -fsSL https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-local.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-local.sh | bash
 
 # with wget
-wget -qO- https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-local.sh | bash
+wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-local.sh | bash
 ```
 
 ### Option D — Python 3 (no curl / no wget)
@@ -81,7 +93,7 @@ wget -qO- https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-l
 One-click install with nothing but **Python 3** installed. It downloads `install-local.sh` and runs it:
 
 ```bash
-python3 -c "import urllib.request as u;print(u.urlopen('https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-local.sh').read().decode())" | bash
+python3 -c "import urllib.request as u;print(u.urlopen('https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-local.sh').read().decode())" | bash
 ```
 
 > This is the same local / no-systemd install as **Option C**, just launched by Python instead of `curl` or `wget`.
@@ -103,18 +115,18 @@ free scheduler): **[Deploy on Vercel](#-deploy-on-vercel)**.
 **Windows PowerShell** (then run it with WSL or Git Bash):
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/sarakmacbook/exchange/main/install-local.sh -OutFile install-local.sh
+Invoke-WebRequest https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install-local.sh -OutFile install-local.sh
 bash install-local.sh
 ```
 
 **Fully manual — download the archive, no git needed:**
 
 ```bash
-mkdir -p ~/exchange && wget -qO- https://codeload.github.com/sarakmacbook/exchange/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C ~/exchange
+mkdir -p ~/exchange && wget -qO- https://codeload.github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C ~/exchange
 cd ~/exchange && bash install-local.sh        # or: sudo bash install.sh
 ```
 
-(With curl instead of wget: `curl -fsSL https://codeload.github.com/sarakmacbook/exchange/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C ~/exchange`)
+(With curl instead of wget: `curl -fsSL https://codeload.github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C ~/exchange`)
 </details>
 
 <details>
@@ -122,11 +134,11 @@ cd ~/exchange && bash install-local.sh        # or: sudo bash install.sh
 
 ```bash
 # curl
-curl -fsSL https://raw.githubusercontent.com/sarakmacbook/exchange/main/install.sh | bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash -s -- \
   --token "123456:ABC-your-token" --admins "123456789" --asset USDT --fiat USD --interval 60
 
 # wget
-wget -qO- https://raw.githubusercontent.com/sarakmacbook/exchange/main/install.sh | bash -s -- \
+wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash -s -- \
   --token "123456:ABC-your-token" --admins "123456789" --asset USDT --fiat USD --interval 60
 ```
 </details>
@@ -135,7 +147,7 @@ wget -qO- https://raw.githubusercontent.com/sarakmacbook/exchange/main/install.s
 <summary>Docker without the installer</summary>
 
 ```bash
-git clone https://github.com/sarakmacbook/exchange.git && cd exchange
+git clone https://github.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot.git && cd OKX_Telegram_P2P_Price_Bot
 cp .env.example .env && nano .env      # BOT_TOKEN + ADMIN_IDS
 docker compose up -d --build
 ```
@@ -370,6 +382,62 @@ the previous group message / expires messages that are older than `delete_after_
 
 ---
 
+## 🧯 Troubleshooting
+
+### ``syntax error near unexpected token `newline'`` / `` `<!DOCTYPE html>' ``
+
+```
+./install.sh: line 7: syntax error near unexpected token `newline'
+./install.sh: line 7:
+`<!DOCTYPE html>'
+```
+
+Your `install.sh` is not a shell script at all — it is a saved **GitHub web page** (the file is
+~700 KB of HTML, and `<!DOCTYPE html>` lands on line 7). That happens when:
+
+| Cause | Why it breaks |
+|---|---|
+| `wget https://github.com/OWNER/REPO/blob/main/install.sh` | `/blob/main/…` is GitHub's HTML *viewer* page, not the file — use `raw.githubusercontent.com` (or add `?raw=true`) |
+| the repository was **renamed** | `github.com` redirects, but `raw.githubusercontent.com` answers with a 404 page |
+| a proxy / login wall returned a page | any HTML body looks like this once bash parses it |
+
+Confirm it in one second:
+
+```bash
+head -n 1 install.sh    # correct: #!/usr/bin/env bash      · broken: blank / <!DOCTYPE html>
+file install.sh         # "HTML document text" = wrong file, "shell script text" = fine
+```
+
+Then re-download it properly — `curl -f` (or `wget -q`) aborts instead of saving an error page:
+
+```bash
+rm -f install.sh uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash
+# …or: wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh | bash
+```
+
+If you want the file on disk first (so you can read it before running it), keep the raw URL and
+run it with `bash`, not `./` — then no `chmod` is needed either:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/install.sh -o install.sh
+bash install.sh
+```
+
+All three installers now verify every download: an HTML/error body is rejected and deleted with
+an explanation instead of being written into the install directory.
+
+### `Could not fetch the bot source into …`
+
+`git clone` and the archive download both failed — usually no network or no `git`/`curl`/`wget`.
+Install one of them, or point the scripts at a fork/renamed repo without editing them:
+
+```bash
+P2P_REPO_SLUG=your-name/your-repo bash install.sh
+```
+
+---
+
 ## 🧪 Tests
 
 ```bash
@@ -420,9 +488,9 @@ bash install-local.sh --uninstall     # stop + remove autostart (keep data)
 
 ```bash
 # systemd install
-curl -fsSL https://raw.githubusercontent.com/sarakmacbook/exchange/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/uninstall.sh | bash
 # …or the same with wget
-wget -qO- https://raw.githubusercontent.com/sarakmacbook/exchange/main/uninstall.sh | bash
+wget -qO- https://raw.githubusercontent.com/sarakmacbook/OKX_Telegram_P2P_Price_Bot/main/uninstall.sh | bash
 # docker install
 bash install-docker.sh --down
 # local install
