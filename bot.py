@@ -1,4 +1,4 @@
-"""Telegram bot: P2P merchant price feed (polling locally, webhook on Vercel)."""
+"""Telegram bot: P2P merchant price feed."""
 
 from __future__ import annotations
 
@@ -21,11 +21,9 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG = Path(os.getenv("P2P_CONFIG_FILE") or (BASE_DIR / "config.json"))
 DB = BASE_DIR / "data.json"
 
-# ── serverless (Vercel) mode ──
-# Vercel sets VERCEL=1 in every function.  There we run as a Telegram webhook,
-# keep the state in Redis/KV (see storage.py) and let /api/cron drive the
-# scheduled posts instead of the in-process JobQueue.
-SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("P2P_SERVERLESS"))
+# ── state store ──
+# data.json next to the bot by default; an optional Redis REST backend can be
+# enabled with KV_REST_API_URL (see storage.py).
 STORE = build_store(BASE_DIR)
 
 ICON = {"binance": "🟡", "bybit": "🟣", "okx": "⚫", "bitget": "🔵"}
@@ -33,14 +31,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("p2p-bot")
 
 
-class ConfigError(RuntimeError):
-    """Raised instead of exiting when the bot runs inside a serverless function."""
-
-
 def _fatal(msg: str):
-    """Exit locally, raise in serverless (so the HTTP layer can report it)."""
-    if SERVERLESS:
-        raise ConfigError(msg)
+    """Log the fatal problem and exit."""
     log.error(msg)
     sys.exit(1)
 
@@ -166,7 +158,7 @@ def load_config():
             _write_config(file_cfg)
         return file_cfg
 
-    if sys.stdin.isatty() and not SERVERLESS:
+    if sys.stdin.isatty():
         return setup_interactive(file_cfg)
     _fatal("No configuration found. Set the BOT_TOKEN and ADMIN_IDS environment "
            "variables (and ASSET/FIAT/INTERVAL), or create config.json with "
@@ -254,17 +246,6 @@ def save():
 
 
 state = load()
-
-
-def reload_state():
-    """Re-read shared state (serverless: another instance may have written it)."""
-    global state
-    if not SERVERLESS:
-        return state
-    fresh = load()
-    if isinstance(fresh, dict):
-        state = fresh
-    return state
 
 
 merchants = lambda: [Merchant(**m) for m in state["merchants"].values()]
@@ -1080,42 +1061,20 @@ async def cleanup_task(bot) -> bool:
             save()
         return False
 
-# ── scheduled work (JobQueue locally, /api/cron on Vercel) ──
+# ── scheduled work ──
 async def job(c: ContextTypes.DEFAULT_TYPE):
-    """PTB JobQueue callback — used by the polling (VPS/Docker) deployment."""
+    """PTB JobQueue callback — posts prices when they change."""
     try:
         await auto_post_task(c.bot)
     except Exception as e:
         log.warning("auto post failed: %s", e)
 
 async def cleanup_job(c: ContextTypes.DEFAULT_TYPE):
-    """PTB JobQueue callback — used by the polling (VPS/Docker) deployment."""
+    """PTB JobQueue callback — deletes stale group messages."""
     try:
         await cleanup_task(c.bot)
     except Exception as e:
         log.warning("cleanup failed: %s", e)
-
-async def run_scheduled(bot, force: bool = False) -> dict:
-    """One scheduler tick: auto-post + housekeeping.
-
-    Called by ``/api/cron`` (Vercel cron / external pinger).  Returns a small
-    summary so the endpoint can report what happened.
-    """
-    reload_state()
-    result = {"posted": False, "deleted": False, "auto": bool(state.get("auto")),
-              "group": state.get("group"), "merchants": len(state.get("merchants") or {}),
-              "errors": []}
-    try:
-        result["posted"] = bool(await post(bot, force=force)) if force else bool(await auto_post_task(bot))
-    except Exception as e:
-        log.warning("scheduled post failed: %s", e)
-        result["errors"].append(f"post: {e}")
-    try:
-        result["deleted"] = bool(await cleanup_task(bot))
-    except Exception as e:
-        log.warning("scheduled cleanup failed: %s", e)
-        result["errors"].append(f"cleanup: {e}")
-    return result
 
 # ── buttons ──
 def list_kb():
@@ -1476,19 +1435,9 @@ def register_handlers(app):
     app.add_error_handler(error_handler)
     return app
 
-def build_application(webhook: bool = False) -> Application:
-    """Build the PTB application.
-
-    ``webhook=False`` → long polling with the in-process JobQueue
-    (VPS / Docker / local installs).
-
-    ``webhook=True``  → no Updater (Telegram calls the Vercel function) and no
-    repeating jobs are registered here: ``/api/cron`` drives the scheduled
-    posts and housekeeping instead.
-    """
+def build_application() -> Application:
+    """Build the PTB application — long polling with the in-process JobQueue."""
     builder = Application.builder().token(TOKEN).post_init(post_init)
-    if webhook:
-        builder = builder.updater(None)          # webhook mode: we push updates ourselves
     return register_handlers(builder.build())
 
 def main():
@@ -1496,7 +1445,7 @@ def main():
         try: signal.signal(sig, lambda *_: sys.exit(0))
         except: pass
 
-    app = build_application(webhook=False)
+    app = build_application()
     app.job_queue.run_repeating(job, interval=INTERVAL, first=5)
     # cleanup job: check every 10 minutes if message older than 24h
     app.job_queue.run_repeating(cleanup_job, interval=600, first=60)

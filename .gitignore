@@ -26,8 +26,5 @@ Thumbs.db
 # systemd local overrides
 *.service.local
 
-# vercel
-.vercel
-
 # tests
 .pytest_cache/

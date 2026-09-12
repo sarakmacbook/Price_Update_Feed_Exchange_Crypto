@@ -2,19 +2,17 @@
 
 Two backends, chosen automatically from the environment:
 
-``redis``  Upstash / Vercel-KV style REST API — what you want on serverless
-           hosts (Vercel), because the filesystem there is read-only and
-           ephemeral.  Enabled by any of::
+``redis``  a Redis-compatible REST API (e.g. Upstash) — for hosts without a
+           writable disk, or when several bot instances share one state.
+           Enabled by any of::
 
-               KV_REST_API_URL      + KV_REST_API_TOKEN        (Vercel KV)
+               KV_REST_API_URL      + KV_REST_API_TOKEN
                UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
                REDIS_REST_URL       + REDIS_REST_TOKEN
 
 ``file``   the classic ``data.json`` next to the bot — default for
            systemd / Docker / local installs.  If the directory is not
-           writable (read-only serverless filesystem) the store falls back to
-           ``$TMPDIR`` and says so, so a Vercel deployment still works —
-           remember to add a Redis/KV store for state that survives cold starts.
+           writable the store falls back to ``$TMPDIR`` and says so.
 
 Nothing here ever raises: a failed write is logged and the in-memory state
 stays the source of truth for the running process.
@@ -48,7 +46,7 @@ def _redis_config() -> tuple[str, str] | None:
 
 
 class RedisStore:
-    """State kept in a Redis-compatible REST service (Upstash / Vercel KV)."""
+    """State kept in a Redis-compatible REST service (e.g. Upstash)."""
 
     backend = "redis"
 
