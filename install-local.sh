@@ -273,6 +273,8 @@ elif [[ ! -d "$INSTALL_DIR" ]]; then
         warn "Archive download failed too — fetching the core files one by one..."
         fetch "$RAW_URL/bot.py"           "$INSTALL_DIR/bot.py"           || true
         fetch "$RAW_URL/exchanges.py"     "$INSTALL_DIR/exchanges.py"     || true
+        fetch "$RAW_URL/adlinks.py"       "$INSTALL_DIR/adlinks.py"       || true
+        fetch "$RAW_URL/storage.py"       "$INSTALL_DIR/storage.py"       || true
         fetch "$RAW_URL/requirements.txt" "$INSTALL_DIR/requirements.txt" || true
       }
     }
@@ -294,7 +296,7 @@ if [[ ! -f "$INSTALL_DIR/bot.py" ]]; then
 fi
 
 cd "$INSTALL_DIR"
-echo "  Files: $(ls -1 bot.py exchanges.py requirements.txt 2>/dev/null | tr '\n' ' ')"
+echo "  Files: $(ls -1 bot.py exchanges.py adlinks.py storage.py requirements.txt 2>/dev/null | tr '\n' ' ')"
 
 # ── 3. venv & deps ──
 step "3/5  Setting up Python environment"

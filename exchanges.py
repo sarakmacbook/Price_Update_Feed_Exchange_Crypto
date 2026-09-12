@@ -80,16 +80,24 @@ def parse_url(url: str, asset: str, fiat: str):
 
     return None
 
-# ---------- Fetch: returns {sell, sell_amount, buy, buy_amount, error} ----------
+# ---------- Fetch ----------
+# Returns, for both sides:
+#   {sell, sell_amount, sell_ad_id, buy, buy_amount, buy_ad_id, error}
 # "sell" = merchant SELLS (you buy) = best selling price ; "buy" = merchant BUYS (you sell)
+# *_ad_id is the id of the ad the price was taken from — it powers the
+# "open the exact ad" Buy/Sell buttons (see adlinks.py).
 async def fetch(c: httpx.AsyncClient, m: Merchant) -> dict:
     try:
         fn = {"binance": _binance, "bybit": _bybit, "okx": _okx, "bitget": _bitget}[m.exchange]
-        sell_price, sell_amt = await fn(c, m, "sell")
-        buy_price, buy_amt = await fn(c, m, "buy")
-        return {"sell": sell_price, "sell_amount": sell_amt, "buy": buy_price, "buy_amount": buy_amt, "error": None}
+        sell_price, sell_amt, sell_ad = await fn(c, m, "sell")
+        buy_price, buy_amt, buy_ad = await fn(c, m, "buy")
+        return {"sell": sell_price, "sell_amount": sell_amt, "sell_ad_id": sell_ad,
+                "buy": buy_price, "buy_amount": buy_amt, "buy_ad_id": buy_ad,
+                "error": None}
     except Exception as e:
-        return {"sell": None, "sell_amount": None, "buy": None, "buy_amount": None, "error": str(e)[:120]}
+        return {"sell": None, "sell_amount": None, "sell_ad_id": None,
+                "buy": None, "buy_amount": None, "buy_ad_id": None,
+                "error": str(e)[:120]}
 
 def _parse_float(v):
     try:
@@ -99,14 +107,15 @@ def _parse_float(v):
         return None
 
 def _best(items, side):
-    """items: list of dict {price, amount}. Return (price, amount) of best, or (None,None)"""
+    """items: list of {price, amount, ad_id}. Return (price, amount, ad_id) of the
+    best ad — cheapest for the merchant's sell side, highest for its buy side."""
     if not items:
-        return None, None
+        return None, None, None
     if side == "sell":
         best = min(items, key=lambda x: x["price"])
     else:
         best = max(items, key=lambda x: x["price"])
-    return best["price"], best["amount"]
+    return best["price"], best["amount"], best.get("ad_id")
 
 async def _binance(c, m, side):
     tt = "BUY" if side == "sell" else "SELL"          # taker view
@@ -129,7 +138,7 @@ async def _binance(c, m, side):
                         amt = _parse_float(adv.get(k))
                         if amt is not None:
                             break
-                items.append({"price": price, "amount": amt})
+                items.append({"price": price, "amount": amt, "ad_id": adv.get("advNo")})
         if len(data) < 20:
             break
     return _best(items, side)
@@ -152,7 +161,8 @@ async def _bybit(c, m, side):
                 amt = _parse_float(it.get(k))
                 if amt is not None:
                     break
-        items.append({"price": price, "amount": amt})
+        items.append({"price": price, "amount": amt,
+                      "ad_id": it.get("id") or it.get("itemId") or it.get("adId")})
     return _best(items, side)
 
 async def _okx(c, m, side):
@@ -173,7 +183,8 @@ async def _okx(c, m, side):
                 amt = _parse_float(a.get(k))
                 if amt is not None:
                     break
-        items.append({"price": price, "amount": amt})
+        items.append({"price": price, "amount": amt,
+                      "ad_id": a.get("id") or a.get("adId")})
     return _best(items, side)
 
 async def _bitget(c, m, side):
@@ -203,5 +214,6 @@ async def _bitget(c, m, side):
                 amt = _parse_float(a.get(k))
                 if amt is not None:
                     break
-        items.append({"price": price, "amount": amt})
+        items.append({"price": price, "amount": amt,
+                      "ad_id": a.get("advId") or a.get("advNo") or a.get("id")})
     return _best(items, side)

@@ -13,11 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py exchanges.py ./
+COPY bot.py exchanges.py adlinks.py storage.py ./
 
 # config & data are mounted as volumes; bot creates them if missing.
 # For non-interactive docker, pass env vars: BOT_TOKEN, ADMIN_IDS, ASSET, FIAT, INTERVAL
 # Example: docker run -e BOT_TOKEN=123:ABC -e ADMIN_IDS=123456 ...
+#
+# State lives in data.json (mounted). To use a Redis/KV store instead
+# (e.g. when several instances share one group), set
+# KV_REST_API_URL + KV_REST_API_TOKEN — see storage.py.
 
 VOLUME ["/app/data"]
 # keep config.json & data.json in /app (or /app/data if you mount)
